@@ -1,0 +1,23 @@
+[
+  {
+    "id": "p1",
+    "name": "Perfil 1",
+    "email": "sua-conta-1@gmail.com",
+    "home": "/root",
+    "concurrency": 4
+  },
+  {
+    "id": "p2",
+    "name": "Perfil 2",
+    "email": "sua-conta-2@gmail.com",
+    "home": "/root/.agy-perfil2",
+    "concurrency": 4
+  },
+  {
+    "id": "p3",
+    "name": "Perfil 3",
+    "email": "sua-conta-3@gmail.com",
+    "home": "/root/.agy-perfil3",
+    "concurrency": 4
+  }
+]

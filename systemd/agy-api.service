@@ -1,0 +1,34 @@
+[Unit]
+Description=Antigravity API Service — Multi-Profile (Gunicorn)
+Documentation=file:///root/README.md
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root
+
+# Gunicorn: 7 workers for multi-profile round-robin
+ExecStart=/usr/bin/gunicorn \
+    --workers 7 \
+    --worker-class sync \
+    --timeout 120 \
+    --keep-alive 5 \
+    --bind 0.0.0.0:8080 \
+    --access-logfile - \
+    --error-logfile - \
+    api_service_multi:app
+
+Restart=always
+RestartSec=5
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+Environment=PORT=8080
+Environment=AGY_BINARY=/root/.local/bin/agy
+
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

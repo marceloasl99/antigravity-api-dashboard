@@ -1,0 +1,32 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Caches and runtime files
+.cache/
+.config/
+/tmp/agy_*
+*.log
+nohup.out
+
+# Virtual environments
+.env
+.venv
+env/
+venv/
+ENV/
+
+# Sensitive profile tokens & OAuth files
+profiles.json
+*.token
+*oauth-token*
+.gemini/
+.agy*
+.ssh/
+
+# OS / Editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

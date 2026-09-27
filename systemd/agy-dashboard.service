@@ -1,0 +1,25 @@
+[Unit]
+Description=AGY Dashboard — porta 80 (uso das contas Google)
+After=network.target agy-api.service
+Wants=agy-api.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root
+
+ExecStart=/usr/bin/python3 /root/dashboard.py
+
+Restart=always
+RestartSec=5
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+Environment=PORT=80
+Environment=API_BASE=http://127.0.0.1:8080
+Environment=DEBUG=false
+
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target
