@@ -1,57 +1,57 @@
 # Antigravity CLI — OpenAI-Compatible API & Multi-Account Dashboard
 
-Transforme o **Antigravity CLI (`agy`)** do Google em uma **API REST 100% compatível com a especificação OpenAI** (`/v1/chat/completions`, `/v1/models`), com suporte a **múltiplas contas Google em Round-Robin** e um **Dashboard Web em tempo real** para monitoramento de uso, cotas, latência e controle de perfis.
+Turn Google's **Antigravity CLI (`agy`)** into a **100% OpenAI-compatible REST API** (`/v1/chat/completions`, `/v1/models`), featuring **Multi-Account Round-Robin load balancing** across multiple Google accounts and a **Real-Time Web Dashboard** for quota, token usage, latency monitoring, and dynamic profile management.
 
-Projetado especialmente para uso local ou em containers (Proxmox LXC, Docker, VMs Debian/Ubuntu).
+Engineered specifically for local homelabs and containerized environments (Proxmox LXC, Docker, Debian/Ubuntu VMs).
 
 ---
 
-## 🚀 Funcionalidades
+## 🚀 Key Features
 
-- **API Compatível com OpenAI (`/v1`)**:
-  - `POST /v1/chat/completions` (suporte completo a streaming SSE e requisições normais).
-  - `GET /v1/models` e `GET /v1/models/{model_id}`.
+- **OpenAI-Compatible API (`/v1`)**:
+  - `POST /v1/chat/completions` (full support for Server-Sent Events (SSE) streaming and standard requests).
+  - `GET /v1/models` and `GET /v1/models/{model_id}`.
   - `GET /v1/health`.
-  - Integrável diretamente com **LibreChat**, **OpenWebUI**, **LiteLLM**, **LangChain**, **Cursor**, etc.
-- **Multi-Contas / Multi-Perfis com Round-Robin**:
-  - Alterne e distribua as requisições entre várias contas Google automaticamente para multiplicar o limite de taxa (rate limits).
-  - Roteamento inteligente: use o prefixo no modelo para forçar uma conta específica (ex: `p1/gemini-3.8-flash-low`, `p2/claude-sonnet-4-6`) ou omita o prefixo para usar round-robin entre contas ativas.
-  - Controle de concorrência por semáforos isolados para cada perfil.
-- **Dashboard Web Moderno (Porta 80)**:
-  - Métricas de consumo de tokens (entrada/saída) e requisições por perfil.
-  - Status de expiração do OAuth token de cada perfil.
-  - Botões para ativar/desativar perfis do pool de round-robin dinamicamente sem reiniciar serviços.
-  - Playground interativo para testar modelos e prompts diretamente do navegador.
-- **Pronto para Produção Local**:
-  - Gunicorn pré-configurado com múltiplos workers síncronos.
-  - Unidades Systemd inclusas com auto-restart em caso de falha.
-  - Cache de verificação de uso para evitar sobrecarga no CLI.
+  - Drop-in compatibility with **LibreChat**, **OpenWebUI**, **LiteLLM**, **LangChain**, **Cursor**, **Continue**, etc.
+- **Multi-Account / Multi-Profile Round-Robin**:
+  - Distribute requests evenly across multiple Google accounts automatically to maximize rate limits and prevent quota throttling.
+  - Smart prefix routing: force a specific account using a model prefix (e.g., `p1/gemini-3.8-flash-low`, `p2/claude-sonnet-4-6`) or omit prefix to round-robin among active accounts.
+  - Isolated concurrency control via per-profile threading semaphores.
+- **Modern Web Dashboard (Port 80)**:
+  - Live metric counters for prompt/completion tokens, requests, and errors per account.
+  - Real-time OAuth token expiry monitor.
+  - Interactive profile toggles to enable/disable accounts from the round-robin pool on the fly with no restart required.
+  - Built-in prompt playground for model testing directly from your browser.
+- **Production-Ready for Homelabs**:
+  - Pre-configured Gunicorn sync workers.
+  - Native Systemd unit definitions with auto-restart on failure.
+  - Built-in usage caching to avoid CLI overhead.
 
 ---
 
-## 📁 Estrutura do Repositório
+## 📁 Repository Structure
 
 ```text
-├── api_service_multi.py     # API principal multi-perfil (Gunicorn / Flask)
-├── api_service.py           # Versão simplificada de perfil único
-├── dashboard.py             # Dashboard Web interativo (porta 80)
-├── profiles.example.json    # Modelo para configuração das contas
-├── .env.example             # Variáveis de ambiente de exemplo
-├── requirements.txt         # Dependências Python
-├── systemd/                 # Serviços systemd prontos para uso
+├── api_service_multi.py     # Multi-profile OpenAI-compatible API (Gunicorn / Flask)
+├── api_service.py           # Simplified single-profile API version
+├── dashboard.py             # Real-time Web Dashboard (port 80)
+├── profiles.example.json    # Account configuration template
+├── .env.example             # Example environment variables
+├── requirements.txt         # Python dependencies
+├── systemd/                 # Production systemd service unit files
 │   ├── agy-api.service
 │   └── agy-dashboard.service
-├── .gitignore               # Configurado para bloquear credenciais e caches
-└── README.md                # Este documento
+├── .gitignore               # Configured to prevent committing credentials/tokens
+└── README.md                # Project documentation
 ```
 
 ---
 
-## 🛠️ Pré-requisitos
+## 🛠️ Prerequisites
 
-1. **Linux** (Ubuntu 22.04 / 24.04, Debian 12 ou Proxmox LXC Container).
+1. **Linux OS** (Ubuntu 22.04 / 24.04, Debian 12, or Proxmox LXC container).
 2. **Python 3.10+**.
-3. **Antigravity CLI** instalado (geralmente em `~/.local/bin/agy`).
+3. **Antigravity CLI** installed and available in `$PATH` (typically `~/.local/bin/agy`):
    ```bash
    curl -L https://antigravity.google/install.sh | bash
    export PATH="$HOME/.local/bin:$PATH"
@@ -59,28 +59,28 @@ Projetado especialmente para uso local ou em containers (Proxmox LXC, Docker, VM
 
 ---
 
-## 🔐 Configurando Múltiplas Contas Google
+## 🔐 Multi-Account Google Authentication
 
-O Antigravity CLI armazena autenticação em `$HOME/.gemini/antigravity-cli/`. Para isolar múltiplos perfis, usamos diretórios `$HOME` distintos:
+The Antigravity CLI stores authentication tokens inside `$HOME/.gemini/antigravity-cli/`. To isolate multiple accounts on the same machine, separate `$HOME` directories are used:
 
-### 1. Autenticar a Conta 1 (Perfil padrão)
+### 1. Authenticate Account 1 (Default Profile)
 ```bash
 agy auth login
 ```
 
-### 2. Autenticar a Conta 2 (Perfil 2)
+### 2. Authenticate Account 2 (Profile 2)
 ```bash
 mkdir -p /root/.agy-perfil2
 HOME=/root/.agy-perfil2 /root/.local/bin/agy auth login
 ```
 
-### 3. Autenticar a Conta 3 (Perfil 3)
+### 3. Authenticate Account 3 (Profile 3)
 ```bash
 mkdir -p /root/.agy-perfil3
 HOME=/root/.agy-perfil3 /root/.local/bin/agy auth login
 ```
 
-*(Opcional)* Adicione aliases ao seu `~/.bashrc` para facilitar manutenções:
+*(Optional)* Add quick aliases to your `~/.bashrc`:
 ```bash
 alias agy2="HOME=/root/.agy-perfil2 /root/.local/bin/agy"
 alias agy3="HOME=/root/.agy-perfil3 /root/.local/bin/agy"
@@ -88,73 +88,73 @@ alias agy3="HOME=/root/.agy-perfil3 /root/.local/bin/agy"
 
 ---
 
-## ⚙️ Instalação e Configuração
+## ⚙️ Installation & Setup
 
-### 1. Instalar Dependências do Sistema e Python
-Em sistemas Ubuntu/Debian:
+### 1. Install System & Python Dependencies
+On Ubuntu/Debian:
 ```bash
 apt-get update -y
 apt-get install -y python3 python3-flask python3-flask-cors gunicorn
 ```
-Ou via `pip`:
+Or with `pip`:
 ```bash
 pip install -r requirements.txt
 ```
 
-### 2. Configurar Perfis
-Você pode definir as contas criando um arquivo `profiles.json` (já ignorado pelo git):
+### 2. Configure Profiles
+Create your own `profiles.json` (this file is git-ignored for safety):
 ```bash
 cp profiles.example.json profiles.json
 ```
-Edite `profiles.json` com os seus e-mails e diretórios correspondentes:
+Edit `profiles.json` with your desired account labels, emails, and home directories:
 ```json
 [
   {
     "id": "p1",
-    "name": "Perfil 1",
-    "email": "sua-conta-1@gmail.com",
+    "name": "Profile 1",
+    "email": "your-account-1@gmail.com",
     "home": "/root",
     "concurrency": 4
   },
   {
     "id": "p2",
-    "name": "Perfil 2",
-    "email": "sua-conta-2@gmail.com",
+    "name": "Profile 2",
+    "email": "your-account-2@gmail.com",
     "home": "/root/.agy-perfil2",
     "concurrency": 4
   },
   {
     "id": "p3",
-    "name": "Perfil 3",
-    "email": "sua-conta-3@gmail.com",
+    "name": "Profile 3",
+    "email": "your-account-3@gmail.com",
     "home": "/root/.agy-perfil3",
     "concurrency": 4
   }
 ]
 ```
-> **Nota**: Se `profiles.json` não existir, a API usará as variáveis de ambiente (`P1_EMAIL`, etc.) ou valores padrão seguros.
+> **Note**: If `profiles.json` is omitted, the service falls back to environment variables (`P1_EMAIL`, etc.) or secure defaults.
 
 ---
 
-## 🚦 Executando Manualmente
+## 🚦 Running Manually
 
-Para testar antes de rodar como serviço:
+To test the services prior to registering systemd daemons:
 
-**Iniciar a API:**
+**Start the API:**
 ```bash
 gunicorn --workers 7 --worker-class sync --timeout 120 --keep-alive 5 --bind 0.0.0.0:8080 api_service_multi:app
 ```
 
-**Iniciar o Dashboard (em outro terminal):**
+**Start the Dashboard (in a separate terminal):**
 ```bash
 PORT=80 API_BASE=http://127.0.0.1:8080 python3 dashboard.py
 ```
 
 ---
 
-## 🔄 Configurando como Serviço (Systemd)
+## 🔄 Running as a Background Daemon (Systemd)
 
-Copie os arquivos da pasta `systemd/` para o diretório de serviços do Linux:
+Copy the provided unit files to `/etc/systemd/system/`:
 
 ```bash
 cp systemd/agy-api.service /etc/systemd/system/
@@ -162,62 +162,75 @@ cp systemd/agy-dashboard.service /etc/systemd/system/
 
 systemctl daemon-reload
 
-# Habilitar para inicializar com o sistema
+# Enable on boot
 systemctl enable agy-api.service
 systemctl enable agy-dashboard.service
 
-# Iniciar serviços
+# Start services
 systemctl start agy-api.service
 systemctl start agy-dashboard.service
 
-# Verificar status
+# Verify status
 systemctl status agy-api.service
 systemctl status agy-dashboard.service
 ```
 
 ---
 
-## 📡 Exemplos de Uso da API
+## 📡 API Usage Examples
 
-### Listar Modelos Disponíveis
+### List Available Models
 ```bash
 curl http://localhost:8080/v1/models
 ```
 
-### Chat Completion (com Round-Robin)
+### Chat Completion (Auto Round-Robin across Active Accounts)
 ```bash
 curl -X POST http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
     "model": "gemini-3.8-flash-low",
     "messages": [
-      {"role": "user", "content": "Olá! Explique o conceito de gravidade em uma frase."}
+      {"role": "user", "content": "Explain quantum computing in one sentence."}
     ]
   }'
 ```
 
-### Chat Completion Direcionado a um Perfil Específico
-Basta colocar o ID do perfil antes do nome do modelo:
+### Targeted Chat Completion (Specific Account)
+Prepend the profile ID (`p1/`, `p2/`, or `p3/`) to the model identifier:
 ```bash
 curl -X POST http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
     "model": "p2/gemini-3.8-flash-low",
     "messages": [
-      {"role": "user", "content": "Teste direcionado ao Perfil 2"}
+      {"role": "user", "content": "Request routed explicitly to Profile 2."}
+    ]
+  }'
+```
+
+### Streaming Chat Completion
+```bash
+curl -N -X POST http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gemini-3.8-flash-low",
+    "stream": true,
+    "messages": [
+      {"role": "user", "content": "Write a short haiku about space."}
     ]
   }'
 ```
 
 ---
 
-## 🔒 Segurança e Privacidade
+## 🔒 Security & Privacy
 
-- **Zero Credenciais**: Nenhum token OAuth (`antigravity-oauth-token`) ou arquivo de autenticação pessoal deve ser enviado ao repositório.
-- **Proteção do Git**: O arquivo `.gitignore` já está pré-configurado para ignorar `.env`, `profiles.json`, diretórios `.gemini`, caches e logs.
-- **Uso Local**: Este serviço foi desenvolvido para rede local / homelab. Caso queira expor externamente, recomendamos utilizar um proxy reverso (Nginx, Caddy, Cloudflare Tunnel) com autenticação básica ou token Bearer.
+- **Zero Credentials in Git**: Local OAuth tokens (`antigravity-oauth-token`) and login states are stored exclusively in your local account directories and are excluded via `.gitignore`.
+- **Pre-configured `.gitignore`**: Blocks `.env`, `profiles.json`, `.gemini`, `.agy*`, virtual environments, caches, and log files.
+- **Local Network Scope**: Designed for local / homelab private networks. If exposing to the public internet, place behind a reverse proxy (Nginx, Traefik, Caddy, Cloudflare Tunnel) with SSL/TLS and Bearer token authentication.
 
 ---
 
-## 📄 Licença
-Distribuído sob a licença MIT. Consulte `LICENSE` para mais informações.
+## 📄 License
+This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.
