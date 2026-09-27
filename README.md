@@ -345,3 +345,9 @@ Distributed under the **MIT License**. See [`LICENSE`](LICENSE) for more informa
 <div align="center">
   <sub>Built with ❤️ for homelabs and AI enthusiasts.</sub>
 </div>
+
+## 📸 Dashboard Screenshots
+### 🎛️ Account Profile Manager & Cluster Status
+![AGY Dashboard Overview](chrome_QqS1kyOse7.png)
+### 📊 Real-Time Quota Telemetry & Request Statistics
+![AGY Dashboard Quota Telemetry](chrome_CYOtLh4LRY.png)
