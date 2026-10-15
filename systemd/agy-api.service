@@ -1,5 +1,5 @@
 [Unit]
-Description=Antigravity API Service — Multi-Profile (Gunicorn)
+Description=Antigravity API Service — Gemini 3.8 Flash Exclusive (Gunicorn gthread)
 Documentation=file:///root/README.md
 After=network.target
 Wants=network.target
@@ -7,26 +7,30 @@ Wants=network.target
 [Service]
 Type=simple
 User=root
-WorkingDirectory=/root
+WorkingDirectory=/tmp
 
-# Gunicorn: 7 workers for multi-profile round-robin
+# Gunicorn: 3 workers x 8 threads = 24 concurrent requests with non-blocking streaming
 ExecStart=/usr/bin/gunicorn \
-    --workers 7 \
-    --worker-class sync \
-    --timeout 120 \
-    --keep-alive 5 \
+    --workers 3 \
+    --threads 8 \
+    --worker-class gthread \
+    --timeout 180 \
+    --keep-alive 30 \
     --bind 0.0.0.0:8080 \
     --access-logfile - \
     --error-logfile - \
+    --pythonpath /root \
     api_service_multi:app
 
 Restart=always
-RestartSec=5
+RestartSec=3
 StartLimitIntervalSec=60
 StartLimitBurst=5
 
 Environment=PORT=8080
 Environment=AGY_BINARY=/root/.local/bin/agy
+Environment=HOME=/root
+Environment=PATH=/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 TimeoutStopSec=30
 

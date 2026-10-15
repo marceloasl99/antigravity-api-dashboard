@@ -1,94 +1,101 @@
 """
-Dashboard web server — porta 80.
+Dashboard web server — port 80.
 
-Exibe o uso das 3 contas Google (perfis AGY) em tempo real,
-incluindo a seção /usage idêntica ao AGY CLI com todos os detalhes,
-E uma seção de gerenciamento para selecionar quais perfis estão
-disponíveis para uso na API (porta 8080).
-
-Depende do api_service_multi.py rodando na porta 8080.
+Antigravity / API Control Panel (port 8080):
+  - Direct selection of Active Profile (no round-robin; selected account responds directly).
+  - Reasoning effort selection for Gemini 3.8 Flash: Low, Medium, High.
+  - Real-time token consumption tracking (Hourly, Daily, Monthly, Account, Recent Requests).
+  - Real-time Google account quota monitoring via AGY CLI.
+  - Privacy Mode toggle to mask sensitive profile emails.
 """
 
 import json
 import os
 import time
-import urllib.request
 import urllib.error
-
+import urllib.request
 from flask import Flask, jsonify, render_template_string, request
+from flask_cors import CORS
 
 app = Flask(__name__)
+CORS(app)
 
 API_BASE = os.getenv("API_BASE", "http://127.0.0.1:8080")
 
-# ---------------------------------------------------------------------------
-# HTML Template
-# ---------------------------------------------------------------------------
-
 DASHBOARD_HTML = """<!DOCTYPE html>
-<html lang="pt-BR">
+<html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>AGY — Dashboard de Contas Google</title>
+  <title>AGY — Control Panel & Google Quotas</title>
   <style>
     :root {
-      --bg: #0f1117;
-      --surface: #1a1d27;
-      --surface2: #252836;
-      --border: #2e3250;
-      --accent: #4f8ef7;
-      --accent2: #38bdf8;
-      --green: #22c55e;
+      --bg: #0b0d13;
+      --surface: #141722;
+      --surface2: #1e2233;
+      --border: #282d42;
+      --accent: #3b82f6;
+      --accent2: #60a5fa;
+      --green: #10b981;
       --red: #ef4444;
-      --orange: #f97316;
-      --yellow: #eab308;
-      --purple: #a78bfa;
-      --text: #e2e8f0;
-      --muted: #64748b;
+      --yellow: #f59e0b;
+      --purple: #8b5cf6;
+      --text: #f3f4f6;
+      --muted: #94a3b8;
       --radius: 12px;
     }
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
       background: var(--bg);
       color: var(--text);
-      font-family: 'Inter', 'Segoe UI', system-ui, sans-serif;
+      font-family: 'Inter', system-ui, -apple-system, sans-serif;
       min-height: 100vh;
-      padding: 24px 16px;
+      padding: 24px 20px;
     }
 
     /* ── HEADER ── */
     header {
       display: flex; align-items: center; justify-content: space-between;
-      flex-wrap: wrap; gap: 12px; margin-bottom: 28px;
+      flex-wrap: wrap; gap: 16px; margin-bottom: 28px;
     }
-    .logo { display: flex; align-items: center; gap: 12px; }
+    .logo { display: flex; align-items: center; gap: 14px; }
     .logo-icon {
-      width: 40px; height: 40px;
-      background: linear-gradient(135deg, #4285f4, #34a853, #fbbc05, #ea4335);
-      border-radius: 10px;
-      display: flex; align-items: center; justify-content: center; font-size: 20px;
+      width: 44px; height: 44px;
+      background: linear-gradient(135deg, #3b82f6, #10b981, #f59e0b, #ef4444);
+      border-radius: 12px;
+      display: flex; align-items: center; justify-content: center; font-size: 22px;
+      box-shadow: 0 4px 12px rgba(59, 130, 246, 0.25);
     }
-    h1 { font-size: 1.5rem; font-weight: 700; }
-    .subtitle { color: var(--muted); font-size: 0.875rem; margin-top: 2px; }
+    h1 { font-size: 1.6rem; font-weight: 800; letter-spacing: -0.02em; }
+    .subtitle { color: var(--muted); font-size: 0.85rem; margin-top: 3px; }
 
     .header-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
     .last-update {
       font-size: 0.8rem; color: var(--muted);
-      background: var(--surface); padding: 6px 12px;
+      background: var(--surface); padding: 7px 14px;
       border-radius: 20px; border: 1px solid var(--border);
+    }
+    .btn-privacy {
+      background: var(--surface); color: var(--muted);
+      border: 1px solid var(--border); border-radius: 8px;
+      padding: 8px 14px; font-size: 0.82rem; font-weight: 600;
+      cursor: pointer; display: flex; align-items: center; gap: 6px;
+      transition: all .2s;
+    }
+    .btn-privacy:hover { color: var(--text); border-color: var(--accent2); }
+    .btn-privacy.active {
+      color: var(--accent2); border-color: rgba(59, 130, 246, 0.4);
+      background: rgba(59, 130, 246, 0.1);
     }
     .btn-refresh {
       background: var(--accent); color: #fff; border: none;
       padding: 10px 20px; border-radius: 8px; cursor: pointer;
       font-size: 0.9rem; font-weight: 600;
       display: flex; align-items: center; gap: 8px;
-      transition: background .2s, transform .1s;
+      transition: all .2s;
     }
-    .btn-refresh:hover { background: #3b7de8; }
-    .btn-refresh:active { transform: scale(.97); }
-    .btn-refresh:disabled { background: var(--muted); cursor: not-allowed; }
-    .btn-refresh .spin { transition: transform .4s; display: inline-block; }
+    .btn-refresh:hover { background: #2563eb; transform: translateY(-1px); }
+    .btn-refresh:active { transform: translateY(0); }
     .btn-refresh.loading .spin { animation: spin .8s linear infinite; }
     @keyframes spin { to { transform: rotate(360deg); } }
 
@@ -96,467 +103,603 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     .auto-refresh select {
       background: var(--surface); color: var(--text);
       border: 1px solid var(--border); border-radius: 6px;
-      padding: 4px 8px; font-size: .8rem; cursor: pointer;
+      padding: 6px 10px; font-size: .8rem; cursor: pointer;
     }
 
-    /* ── SECTION TITLE ── */
-    .section-title {
-      font-size: 1rem; font-weight: 700; color: var(--text);
-      margin-bottom: 14px; display: flex; align-items: center; gap: 8px;
-    }
-    .section-title .pill {
-      font-size: .7rem; background: var(--surface2); border: 1px solid var(--border);
-      color: var(--muted); padding: 2px 8px; border-radius: 20px; font-weight: 400;
-    }
-
-    /* ── SUMMARY BAR ── */
-    .summary-bar {
-      display: grid; grid-template-columns: repeat(auto-fit, minmax(155px, 1fr));
-      gap: 12px; margin-bottom: 28px;
-    }
-    .summary-card {
-      background: var(--surface); border: 1px solid var(--border);
-      border-radius: var(--radius); padding: 16px 20px;
-    }
-    .summary-label { font-size: .75rem; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; margin-bottom: 6px; }
-    .summary-value { font-size: 1.75rem; font-weight: 700; }
-    .c-blue   { color: var(--accent); }
-    .c-green  { color: var(--green); }
-    .c-purple { color: var(--purple); }
-    .c-red    { color: var(--red); }
-    .c-orange { color: var(--orange); }
-
-    /* ── PROFILE MANAGER ── */
-    .manager-section {
-      margin-bottom: 36px;
+    /* ── CONFIG PANEL (MAIN) ── */
+    .config-panel {
       background: var(--surface);
       border: 1px solid var(--border);
       border-radius: var(--radius);
-      overflow: hidden;
+      padding: 24px;
+      margin-bottom: 32px;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.2);
     }
-    .manager-header {
+    .config-header {
       display: flex; align-items: center; justify-content: space-between;
       flex-wrap: wrap; gap: 12px;
-      padding: 16px 20px;
+      margin-bottom: 20px; padding-bottom: 16px;
+      border-bottom: 1px solid var(--border);
+    }
+    .config-title {
+      font-size: 1.15rem; font-weight: 800; display: flex; align-items: center; gap: 8px;
+    }
+    .status-badge-active {
+      font-size: 0.8rem; font-weight: 600;
+      background: rgba(16, 185, 129, 0.12);
+      color: var(--green);
+      border: 1px solid rgba(16, 185, 129, 0.3);
+      padding: 5px 12px; border-radius: 20px;
+    }
+
+    .config-group { margin-bottom: 22px; }
+    .config-group:last-child { margin-bottom: 0; }
+    .group-label {
+      font-size: 0.8rem; font-weight: 700; text-transform: uppercase;
+      letter-spacing: 0.05em; color: var(--muted); margin-bottom: 12px;
+      display: flex; align-items: center; gap: 6px;
+    }
+
+    /* Profile Direct Selector */
+    .profile-select-grid {
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 14px;
+    }
+    .profile-select-card {
       background: var(--surface2);
-      border-bottom: 1px solid var(--border);
-    }
-    .manager-header-left {
-      display: flex; align-items: center; gap: 10px;
-    }
-    .manager-title { font-weight: 700; font-size: 1rem; }
-    .manager-subtitle { font-size: .78rem; color: var(--muted); margin-top: 2px; }
-    .manager-actions { display: flex; gap: 8px; flex-wrap: wrap; }
-    .btn-sm {
-      padding: 7px 14px; border-radius: 7px; border: 1px solid var(--border);
-      font-size: .8rem; font-weight: 600; cursor: pointer;
-      transition: background .15s, border-color .15s, transform .1s;
-    }
-    .btn-sm:active { transform: scale(.96); }
-    .btn-all  { background: rgba(34,197,94,.12); color: var(--green); border-color: rgba(34,197,94,.3); }
-    .btn-all:hover  { background: rgba(34,197,94,.22); }
-    .btn-none { background: rgba(239,68,68,.12); color: var(--red); border-color: rgba(239,68,68,.3); }
-    .btn-none:hover { background: rgba(239,68,68,.22); }
-    .btn-save {
-      background: var(--accent); color: #fff; border-color: var(--accent);
-    }
-    .btn-save:hover { background: #3b7de8; }
-    .btn-save:disabled { background: var(--muted); border-color: var(--muted); cursor: not-allowed; opacity: .6; }
-
-    .manager-profiles {
-      display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-      gap: 0;
-    }
-    .manager-profile-row {
+      border: 2px solid var(--border);
+      border-radius: 10px;
+      padding: 16px;
       display: flex; align-items: center; justify-content: space-between;
-      padding: 18px 20px;
-      border-right: 1px solid var(--border);
-      border-bottom: 1px solid var(--border);
-      transition: background .15s;
       cursor: pointer;
-      user-select: none;
+      transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
     }
-    .manager-profile-row:last-child { border-right: none; }
-    .manager-profile-row:hover { background: rgba(79,142,247,.05); }
-    .manager-profile-row.enabled-row { border-top: 2px solid transparent; }
-    .manager-profile-row.enabled-row.p1-active { border-top-color: #4285f4; }
-    .manager-profile-row.enabled-row.p2-active { border-top-color: #fbbc05; }
-    .manager-profile-row.enabled-row.p3-active { border-top-color: #9c27b0; }
-
-    .manager-profile-info { display: flex; align-items: center; gap: 12px; }
-    .mgr-avatar {
-      width: 38px; height: 38px; border-radius: 50%;
+    .profile-select-card:hover {
+      border-color: rgba(96, 165, 250, 0.6);
+      transform: translateY(-2px);
+    }
+    .profile-select-card.active {
+      border-color: var(--accent);
+      background: rgba(59, 130, 246, 0.08);
+      box-shadow: 0 0 16px rgba(59, 130, 246, 0.25);
+    }
+    .card-left { display: flex; align-items: center; gap: 12px; }
+    .p-avatar {
+      width: 40px; height: 40px; border-radius: 50%;
       display: flex; align-items: center; justify-content: center;
-      font-size: .9rem; font-weight: 700; flex-shrink: 0;
-      transition: opacity .2s;
+      font-size: 1rem; font-weight: 800; color: #fff;
     }
-    .mgr-avatar.p1 { background: linear-gradient(135deg,#4285f4,#34a853); }
-    .mgr-avatar.p2 { background: linear-gradient(135deg,#fbbc05,#ea4335); }
-    .mgr-avatar.p3 { background: linear-gradient(135deg,#9c27b0,#3f51b5); }
-    .mgr-avatar.disabled-avatar { filter: grayscale(1); opacity: .4; }
+    .p-avatar.p1 { background: linear-gradient(135deg, #4285f4, #34a853); }
+    .p-avatar.p2 { background: linear-gradient(135deg, #fbbc05, #ea4335); }
+    .p-avatar.p3 { background: linear-gradient(135deg, #9c27b0, #3f51b5); }
 
-    .mgr-name { font-weight: 700; font-size: .9rem; transition: color .2s; }
-    .mgr-email { font-size: .73rem; color: var(--muted); margin-top: 2px; }
-    .mgr-status-tag {
-      font-size: .65rem; padding: 2px 7px; border-radius: 4px;
-      font-weight: 600; margin-top: 4px; display: inline-block;
-      transition: all .2s;
-    }
-    .mgr-status-tag.tag-on  { background: rgba(34,197,94,.15); color: var(--green); border: 1px solid rgba(34,197,94,.3); }
-    .mgr-status-tag.tag-off { background: rgba(100,116,139,.12); color: var(--muted); border: 1px solid var(--border); }
+    .p-meta-name { font-weight: 700; font-size: 0.95rem; }
+    .p-meta-email { font-size: 0.78rem; color: var(--muted); margin-top: 2px; }
 
-    /* Toggle switch */
-    .toggle-wrap { display: flex; align-items: center; gap: 10px; }
-    .toggle {
-      position: relative; width: 46px; height: 24px;
-      flex-shrink: 0;
+    .active-tag {
+      font-size: 0.7rem; font-weight: 700;
+      padding: 4px 10px; border-radius: 6px;
+      text-transform: uppercase; letter-spacing: 0.04em;
     }
-    .toggle input { opacity: 0; width: 0; height: 0; position: absolute; }
-    .toggle-slider {
-      position: absolute; inset: 0; border-radius: 24px;
-      background: var(--border); cursor: pointer;
-      transition: background .25s;
+    .profile-select-card.active .active-tag {
+      background: var(--accent); color: #fff;
     }
-    .toggle-slider::before {
-      content: ''; position: absolute;
-      width: 18px; height: 18px; border-radius: 50%;
-      background: #fff; top: 3px; left: 3px;
-      transition: transform .25s;
-      box-shadow: 0 1px 3px rgba(0,0,0,.3);
+    .profile-select-card:not(.active) .active-tag {
+      background: var(--surface); color: var(--muted); border: 1px solid var(--border);
     }
-    .toggle input:checked + .toggle-slider { background: var(--green); }
-    .toggle input:checked + .toggle-slider::before { transform: translateX(22px); }
 
-    /* Warning bar when 0 profiles enabled */
-    .no-profiles-warn {
-      margin: 12px 20px;
-      background: rgba(239,68,68,.1); border: 1px solid rgba(239,68,68,.3);
-      border-radius: 8px; padding: 10px 14px;
-      color: var(--red); font-size: .82rem;
+    /* Model effort selector */
+    .effort-select-grid {
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 14px;
+    }
+    .effort-card {
+      background: var(--surface2);
+      border: 2px solid var(--border);
+      border-radius: 10px;
+      padding: 16px;
+      cursor: pointer;
+      transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+      position: relative;
+    }
+    .effort-card:hover {
+      border-color: rgba(96, 165, 250, 0.6);
+      transform: translateY(-2px);
+    }
+    .effort-card.active.low {
+      border-color: var(--green);
+      background: rgba(16, 185, 129, 0.08);
+      box-shadow: 0 0 16px rgba(16, 185, 129, 0.25);
+    }
+    .effort-card.active.medium {
+      border-color: var(--yellow);
+      background: rgba(245, 158, 11, 0.08);
+      box-shadow: 0 0 16px rgba(245, 158, 11, 0.25);
+    }
+    .effort-card.active.high {
+      border-color: var(--purple);
+      background: rgba(139, 92, 246, 0.08);
+      box-shadow: 0 0 16px rgba(139, 92, 246, 0.25);
+    }
+    .effort-top { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+    .effort-title { font-weight: 700; font-size: 0.95rem; display: flex; align-items: center; gap: 6px; }
+    .effort-model { font-family: monospace; font-size: 0.74rem; color: var(--muted); margin-bottom: 8px; }
+    .effort-desc { font-size: 0.75rem; color: var(--muted); line-height: 1.4; }
+
+    .effort-tag {
+      font-size: 0.68rem; font-weight: 700; padding: 2px 8px; border-radius: 4px;
+    }
+    .effort-card.active.low .effort-tag { background: var(--green); color: #fff; }
+    .effort-card.active.medium .effort-tag { background: var(--yellow); color: #000; }
+    .effort-card.active.high .effort-tag { background: var(--purple); color: #fff; }
+    .effort-card:not(.active) .effort-tag { background: var(--surface); color: var(--muted); border: 1px solid var(--border); }
+
+    .feedback-toast {
+      margin-top: 16px;
+      padding: 10px 16px;
+      border-radius: 8px;
+      font-size: 0.85rem; font-weight: 600;
       display: none; align-items: center; gap: 8px;
     }
-    .no-profiles-warn.visible { display: flex; }
+    .feedback-toast.show { display: flex; }
+    .feedback-toast.success { background: rgba(16, 185, 129, 0.15); color: var(--green); border: 1px solid rgba(16, 185, 129, 0.3); }
+    .feedback-toast.error { background: rgba(239, 68, 68, 0.15); color: var(--red); border: 1px solid rgba(239, 68, 68, 0.3); }
 
-    .save-feedback {
-      padding: 10px 20px;
-      font-size: .82rem; color: var(--green);
-      display: none; align-items: center; gap: 6px;
-      border-top: 1px solid var(--border);
-      background: rgba(34,197,94,.05);
+    /* ── SUMMARY STATS ── */
+    .summary-bar {
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+      gap: 14px; margin-bottom: 32px;
     }
-    .save-feedback.visible { display: flex; }
-    .save-feedback.err { color: var(--red); }
-
-    /* ── PROFILE CARDS (top section) ── */
-    .profiles-grid {
-      display: grid; grid-template-columns: repeat(auto-fit, minmax(310px, 1fr));
-      gap: 20px; margin-bottom: 40px;
-    }
-    .profile-card {
+    .summary-card {
       background: var(--surface); border: 1px solid var(--border);
-      border-radius: var(--radius); overflow: hidden; transition: border-color .2s;
+      border-radius: var(--radius); padding: 18px 20px;
     }
-    .profile-card:hover { border-color: var(--accent); }
-    .card-header {
-      padding: 16px 20px; display: flex; align-items: center; gap: 14px;
-      border-bottom: 1px solid var(--border); background: var(--surface2);
+    .summary-label { font-size: .75rem; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; margin-bottom: 6px; }
+    .summary-value { font-size: 1.7rem; font-weight: 800; }
+    .c-blue   { color: var(--accent2); }
+    .c-green  { color: var(--green); }
+    .c-purple { color: var(--purple); }
+    .c-red    { color: var(--red); }
+    .c-orange { color: var(--yellow); }
+
+    /* ── TOKEN TRACKING SECTION ── */
+    .token-section {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 24px;
+      margin-bottom: 32px;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.2);
     }
-    .avatar {
-      width: 42px; height: 42px; border-radius: 50%;
-      display: flex; align-items: center; justify-content: center;
-      font-size: 1.1rem; font-weight: 700; flex-shrink: 0;
+    .token-grid-cards {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 16px;
+      margin-bottom: 24px;
     }
-    .avatar.p1 { background: linear-gradient(135deg,#4285f4,#34a853); }
-    .avatar.p2 { background: linear-gradient(135deg,#fbbc05,#ea4335); }
-    .avatar.p3 { background: linear-gradient(135deg,#9c27b0,#3f51b5); }
-    .card-title { flex: 1; min-width: 0; }
-    .profile-name  { font-weight: 700; font-size: .95rem; }
-    .profile-email { font-size: .78rem; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .status-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
-    .status-dot.ok   { background: var(--green);  box-shadow: 0 0 6px var(--green); }
-    .status-dot.warn { background: var(--yellow); }
-    .status-dot.err  { background: var(--red); }
-    .card-body { padding: 18px 20px; }
-    .stat-row {
+    .token-card {
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 18px;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      transition: transform .2s, border-color .2s;
+    }
+    .token-card:hover {
+      transform: translateY(-2px);
+      border-color: rgba(96, 165, 250, 0.5);
+    }
+    .token-card-header {
       display: flex; align-items: center; justify-content: space-between;
-      padding: 7px 0; border-bottom: 1px solid var(--border);
+      margin-bottom: 12px;
     }
-    .stat-row:last-child { border-bottom: none; }
-    .stat-label { font-size: .8rem; color: var(--muted); display: flex; align-items: center; gap: 5px; }
-    .stat-value { font-size: .88rem; font-weight: 600; }
-    .sv-blue   { color: var(--accent2); }
-    .sv-tok    { color: var(--accent); }
-    .sv-err    { color: var(--red); }
-
-    .mini-bar-wrap { margin-top: 14px; }
-    .mini-bar-labels { display: flex; justify-content: space-between; font-size: .72rem; color: var(--muted); margin-bottom: 5px; }
-    .mini-bar-bg { background: var(--border); height: 5px; border-radius: 3px; overflow: hidden; }
-    .mini-bar-fill { height: 100%; border-radius: 3px; transition: width .5s; }
-    .mini-bar-fill.p1 { background: linear-gradient(90deg,#4285f4,#34a853); }
-    .mini-bar-fill.p2 { background: linear-gradient(90deg,#fbbc05,#ea4335); }
-    .mini-bar-fill.p3 { background: linear-gradient(90deg,#9c27b0,#3f51b5); }
-
-    .token-badge {
-      margin-top: 12px; font-size: .72rem; padding: 7px 11px;
-      border-radius: 6px; display: flex; align-items: center; gap: 6px;
+    .token-card-title {
+      font-size: 0.85rem; font-weight: 700; text-transform: uppercase;
+      letter-spacing: 0.04em; color: var(--muted);
     }
-    .token-badge.valid    { background: rgba(34,197,94,.1);  color: var(--green);  border: 1px solid rgba(34,197,94,.2); }
-    .token-badge.expiring { background: rgba(234,179,8,.1);  color: var(--yellow); border: 1px solid rgba(234,179,8,.2); }
-    .token-badge.expired  { background: rgba(239,68,68,.1);  color: var(--red);    border: 1px solid rgba(239,68,68,.2); }
+    .token-card-badge {
+      font-size: 0.7rem; font-weight: 700; padding: 3px 8px; border-radius: 6px;
+      background: rgba(59, 130, 246, 0.15); color: var(--accent2);
+      border: 1px solid rgba(59, 130, 246, 0.25);
+    }
+    .token-card-total {
+      font-size: 1.85rem; font-weight: 800; margin-bottom: 12px; font-family: monospace;
+    }
+    .token-card-detail {
+      font-size: 0.78rem; color: var(--muted); display: flex; flex-direction: column; gap: 6px;
+      background: var(--surface); padding: 10px 12px; border-radius: 6px; border: 1px solid var(--border);
+    }
+    .token-detail-row {
+      display: flex; justify-content: space-between; align-items: center;
+    }
+    .token-detail-row span.val {
+      font-weight: 700; color: var(--text); font-family: monospace;
+    }
 
-    /* ── USAGE SECTION ── */
-    .usage-section { margin-bottom: 40px; }
+    /* Tabs & Tables */
+    .token-tabs {
+      display: flex; gap: 8px; margin-bottom: 16px; border-bottom: 1px solid var(--border);
+      padding-bottom: 12px; flex-wrap: wrap;
+    }
+    .token-tab-btn {
+      background: var(--surface2); color: var(--muted); border: 1px solid var(--border);
+      padding: 8px 16px; border-radius: 8px; font-size: 0.82rem; font-weight: 600;
+      cursor: pointer; transition: all 0.2s;
+    }
+    .token-tab-btn:hover {
+      color: var(--text); border-color: var(--accent2);
+    }
+    .token-tab-btn.active {
+      background: var(--accent); color: #fff; border-color: var(--accent);
+      box-shadow: 0 2px 8px rgba(59, 130, 246, 0.3);
+    }
+
+    .token-table-wrap {
+      overflow-x: auto;
+      max-height: 400px;
+      overflow-y: auto;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--surface2);
+    }
+    .token-table {
+      width: 100%; border-collapse: collapse; font-size: 0.82rem;
+    }
+    .token-table th {
+      background: #191c2b; color: var(--muted); font-weight: 700;
+      text-transform: uppercase; letter-spacing: 0.04em; padding: 11px 16px;
+      text-align: left; border-bottom: 1px solid var(--border); position: sticky; top: 0; z-index: 1;
+    }
+    .token-table td {
+      padding: 10px 16px; border-bottom: 1px solid var(--border); color: var(--text);
+    }
+    .token-table tr:last-child td {
+      border-bottom: none;
+    }
+    .token-table tr:hover td {
+      background: rgba(255, 255, 255, 0.03);
+    }
+    .token-table td.num {
+      text-align: right; font-family: monospace; font-size: 0.85rem; font-weight: 600;
+    }
+    .token-table th.num {
+      text-align: right;
+    }
+
+    /* ── USAGE MONITOR SECTION ── */
+    .section-title {
+      font-size: 1.15rem; font-weight: 700; color: var(--text);
+      margin-bottom: 16px; display: flex; align-items: center; gap: 10px;
+    }
+    .section-title .pill {
+      font-size: .72rem; background: var(--surface2); border: 1px solid var(--border);
+      color: var(--muted); padding: 3px 10px; border-radius: 20px; font-weight: 500;
+    }
 
     .usage-grid {
-      display: grid; grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
-      gap: 20px;
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+      gap: 20px; margin-bottom: 40px;
     }
-
     .usage-card {
       background: var(--surface); border: 1px solid var(--border);
       border-radius: var(--radius); overflow: hidden;
+      transition: border-color .2s;
     }
-
+    .usage-card.active-card {
+      border-color: var(--accent);
+      box-shadow: 0 0 16px rgba(59, 130, 246, 0.15);
+    }
     .usage-card-header {
-      padding: 14px 20px; background: var(--surface2);
+      padding: 16px 20px; background: var(--surface2);
       border-bottom: 1px solid var(--border);
-      display: flex; align-items: center; gap: 12px;
+      display: flex; align-items: center; justify-content: space-between; gap: 12px;
     }
+    .usage-card-left { display: flex; align-items: center; gap: 12px; }
     .usage-avatar {
-      width: 36px; height: 36px; border-radius: 50%;
+      width: 38px; height: 38px; border-radius: 50%;
       display: flex; align-items: center; justify-content: center;
-      font-size: .9rem; font-weight: 700; flex-shrink: 0;
+      font-size: .95rem; font-weight: 800; color: #fff;
     }
-    .usage-card-meta { flex: 1; min-width: 0; }
-    .usage-card-name  { font-weight: 700; font-size: .9rem; }
-    .usage-card-email { font-size: .73rem; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .usage-card-name { font-weight: 700; font-size: .95rem; }
+    .usage-card-email { font-size: .75rem; color: var(--muted); }
 
-    .usage-loading {
-      padding: 32px; text-align: center;
-      color: var(--muted); font-size: .85rem;
-    }
-    .usage-spinner {
-      display: inline-block; width: 18px; height: 18px;
-      border: 2px solid var(--border); border-top-color: var(--accent);
-      border-radius: 50%; animation: spin .7s linear infinite;
-      margin-right: 8px; vertical-align: middle;
-    }
-
-    .usage-desc {
-      font-size: .72rem; color: var(--muted);
-      padding: 10px 20px 0 20px; line-height: 1.5;
-    }
-
-    .usage-groups { padding: 12px 20px 20px 20px; }
-
-    .usage-group { margin-bottom: 22px; }
+    .usage-groups { padding: 16px 20px 20px 20px; }
+    .usage-group { margin-bottom: 20px; }
     .usage-group:last-child { margin-bottom: 0; }
-
-    .usage-group-name {
-      font-size: .78rem; font-weight: 700;
-      color: var(--text); margin-bottom: 2px;
-      display: flex; align-items: center; gap: 6px;
-    }
-    .usage-group-models { font-size: .68rem; color: var(--muted); margin-bottom: 12px; }
+    .usage-group-name { font-size: .8rem; font-weight: 700; margin-bottom: 4px; display: flex; align-items: center; gap: 6px; }
 
     .bucket { margin-bottom: 14px; }
     .bucket:last-child { margin-bottom: 0; }
-
-    .bucket-header {
-      display: flex; align-items: center; justify-content: space-between;
-      margin-bottom: 4px;
-    }
+    .bucket-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }
     .bucket-name { font-size: .78rem; color: var(--muted); }
-    .bucket-pct  { font-size: .88rem; font-weight: 700; }
+    .bucket-pct { font-size: .85rem; font-weight: 700; }
 
-    .bar-bg {
-      height: 10px; background: var(--border); border-radius: 5px;
-      overflow: hidden; margin-bottom: 5px;
-    }
-    .bar-fill {
-      height: 100%; border-radius: 5px;
-      transition: width .6s cubic-bezier(.4,0,.2,1);
-    }
-
-    /* colour by percentage */
-    .bar-fill.hi   { background: linear-gradient(90deg, #22c55e, #16a34a); }
-    .bar-fill.med  { background: linear-gradient(90deg, #eab308, #ca8a04); }
-    .bar-fill.lo   { background: linear-gradient(90deg, #ef4444, #dc2626); }
+    .bar-bg { height: 9px; background: var(--border); border-radius: 5px; overflow: hidden; margin-bottom: 5px; }
+    .bar-fill { height: 100%; border-radius: 5px; transition: width .6s ease; }
+    .bar-fill.hi { background: linear-gradient(90deg, #10b981, #059669); }
+    .bar-fill.med { background: linear-gradient(90deg, #f59e0b, #d97706); }
+    .bar-fill.lo { background: linear-gradient(90deg, #ef4444, #dc2626); }
     .bar-fill.zero { background: var(--border); }
-    .bar-fill.dis  { background: repeating-linear-gradient(45deg,#2e3250,#2e3250 4px,#252836 4px,#252836 8px); }
 
-    .bucket-desc {
-      font-size: .71rem; color: var(--muted);
-      line-height: 1.45;
-    }
+    .bucket-desc { font-size: .72rem; color: var(--muted); line-height: 1.4; }
+    .bucket-reset { font-size: .68rem; color: var(--muted); margin-top: 2px; }
 
-    .bucket-reset {
-      font-size: .68rem; color: var(--muted);
-      margin-top: 2px;
+    .token-badge {
+      font-size: .72rem; padding: 5px 10px; border-radius: 6px; margin-top: 12px;
+      display: flex; align-items: center; gap: 6px;
     }
-
-    .tag-disabled {
-      font-size: .65rem; background: rgba(100,116,139,.15);
-      color: var(--muted); border: 1px solid var(--border);
-      border-radius: 4px; padding: 1px 6px; margin-left: 6px;
-      vertical-align: middle;
-    }
-    .tag-exhausted {
-      font-size: .65rem; background: rgba(239,68,68,.12);
-      color: var(--red); border: 1px solid rgba(239,68,68,.25);
-      border-radius: 4px; padding: 1px 6px; margin-left: 6px;
-      vertical-align: middle;
-    }
-
-    .usage-error {
-      padding: 20px; font-size: .82rem; color: var(--red);
-      display: flex; align-items: center; gap: 8px;
-    }
-
-    /* ── ERROR BANNER ── */
-    .error-banner {
-      background: rgba(239,68,68,.1); border: 1px solid rgba(239,68,68,.3);
-      border-radius: 8px; padding: 12px 16px; margin-bottom: 20px;
-      color: var(--red); font-size: .875rem; display: none;
-    }
+    .token-badge.valid { background: rgba(16, 185, 129, 0.1); color: var(--green); border: 1px solid rgba(16, 185, 129, 0.2); }
+    .token-badge.expiring { background: rgba(245, 158, 11, 0.1); color: var(--yellow); border: 1px solid rgba(245, 158, 11, 0.2); }
+    .token-badge.expired { background: rgba(239, 68, 68, 0.1); color: var(--red); border: 1px solid rgba(239, 68, 68, 0.2); }
 
     footer {
-      margin-top: 32px; text-align: center;
-      font-size: .72rem; color: var(--muted);
+      margin-top: 40px; text-align: center;
+      font-size: .78rem; color: var(--muted); padding-top: 20px;
+      border-top: 1px solid var(--border);
     }
-    footer a { color: var(--accent); text-decoration: none; }
-    footer a:hover { text-decoration: underline; }
+    footer a { color: var(--accent2); text-decoration: none; }
   </style>
 </head>
 <body>
 
   <header>
     <div class="logo">
-      <div class="logo-icon">🤖</div>
+      <div class="logo-icon">⚡</div>
       <div>
-        <h1>AGY — Dashboard</h1>
-        <div class="subtitle">3 contas Google · uso em tempo real</div>
+        <h1>AGY — Control Panel</h1>
+        <div class="subtitle">OpenAI API at <code style="color:var(--accent2)">http://10.0.0.108:8080/v1</code> · Gemini 3.8 Flash</div>
       </div>
     </div>
     <div class="header-actions">
+      <button class="btn-privacy active" id="privacyBtn" onclick="togglePrivacy()" title="Toggle sensitive data masking">
+        <span id="privacyIcon">🔒</span> <span id="privacyText">Privacy: ON</span>
+      </button>
       <div class="auto-refresh">
-        Auto-atualizar:
+        Auto refresh:
         <select id="autoRefreshSelect" onchange="setAutoRefresh(this.value)">
-          <option value="0">Desativado</option>
-          <option value="10">10s</option>
+          <option value="0">Disabled</option>
+          <option value="15">15s</option>
           <option value="30" selected>30s</option>
-          <option value="60">1min</option>
-          <option value="300">5min</option>
+          <option value="60">1m</option>
         </select>
       </div>
       <div class="last-update" id="lastUpdate">—</div>
       <button class="btn-refresh" id="refreshBtn" onclick="loadAll(true)">
-        <span class="spin">↻</span> Atualizar
+        <span class="spin">↻</span> Refresh
       </button>
     </div>
   </header>
 
-  <div class="error-banner" id="errorBanner"></div>
-
   <!-- ══════════════════════════════════════════════
-       GERENCIAR PERFIS — seção nova
+       CONFIGURATION PANEL (DIRECT ROUTING)
   ══════════════════════════════════════════════ -->
-  <div class="section-title">
-    ⚙️ Gerenciar Perfis Ativos
-    <span class="pill" id="managerPill">carregando…</span>
-  </div>
+  <div class="config-panel">
+    <div class="config-header">
+      <div class="config-title">
+        ⚙️ API Configuration
+      </div>
+      <div class="status-badge-active" id="activeStatusBadge">
+        Loading status...
+      </div>
+    </div>
 
-  <div class="manager-section" id="managerSection">
-    <div class="manager-header">
-      <div class="manager-header-left">
-        <div>
-          <div class="manager-title">Perfis disponíveis para a API</div>
-          <div class="manager-subtitle">
-            Escolha quais perfis o <code style="font-size:.78rem;background:var(--bg);padding:1px 5px;border-radius:4px;">:8080/v1</code> usará no round-robin.
-            Requisições com prefixo <code style="font-size:.78rem;background:var(--bg);padding:1px 5px;border-radius:4px;">p1/</code> <code style="font-size:.78rem;background:var(--bg);padding:1px 5px;border-radius:4px;">p2/</code> <code style="font-size:.78rem;background:var(--bg);padding:1px 5px;border-radius:4px;">p3/</code> ignoram esta seleção.
+    <!-- 1. Active Account -->
+    <div class="config-group">
+      <div class="group-label">
+        👤 1. Select Active Account (Direct API Routing)
+      </div>
+      <div class="profile-select-grid" id="profileSelectGrid">
+        <!-- Rendered by JS -->
+      </div>
+    </div>
+
+    <!-- 2. Reasoning Effort (Gemini 3.8 Flash) -->
+    <div class="config-group">
+      <div class="group-label">
+        🧠 2. Select Reasoning Effort — Gemini 3.8 Flash
+      </div>
+      <div class="effort-select-grid" id="effortSelectGrid">
+        <div class="effort-card" id="card-effort-low" onclick="selectEffort('low')">
+          <div class="effort-top">
+            <span class="effort-title">🟢 Low</span>
+            <span class="effort-tag" id="tag-effort-low">SELECT</span>
           </div>
+          <div class="effort-model">gemini-3.8-flash-low</div>
+          <div class="effort-desc">Lowest latency and near-instant response. Ideal for maximum speed and straightforward tasks.</div>
+        </div>
+
+        <div class="effort-card" id="card-effort-medium" onclick="selectEffort('medium')">
+          <div class="effort-top">
+            <span class="effort-title">🟡 Medium</span>
+            <span class="effort-tag" id="tag-effort-medium">SELECT</span>
+          </div>
+          <div class="effort-model">gemini-3.8-flash-medium</div>
+          <div class="effort-desc">Recommended balance between response speed and structured analytical reasoning.</div>
+        </div>
+
+        <div class="effort-card" id="card-effort-high" onclick="selectEffort('high')">
+          <div class="effort-top">
+            <span class="effort-title">🟣 High</span>
+            <span class="effort-tag" id="tag-effort-high">SELECT</span>
+          </div>
+          <div class="effort-model">gemini-3.8-flash-high</div>
+          <div class="effort-desc">Deep and reflective reasoning. Ideal for complex coding, architectural design, and subtle logic.</div>
         </div>
       </div>
-      <div class="manager-actions">
-        <button class="btn-sm btn-all"  onclick="selectAll()">✅ Todos</button>
-        <button class="btn-sm btn-none" onclick="selectNone()">🚫 Nenhum</button>
-        <button class="btn-sm btn-save" id="saveBtn" onclick="saveEnabled()">💾 Salvar</button>
-      </div>
     </div>
 
-    <div class="no-profiles-warn" id="noProfilesWarn">
-      ⚠️ Nenhum perfil selecionado! A API usará o Perfil 1 como fallback mas ficará sem round-robin.
-    </div>
-
-    <div class="manager-profiles" id="managerProfiles">
-      <!-- populated by JS -->
-    </div>
-
-    <div class="save-feedback" id="saveFeedback"></div>
+    <div class="feedback-toast" id="configToast"></div>
   </div>
 
-  <!-- Summary -->
+  <!-- Summary Stats -->
   <div class="summary-bar">
     <div class="summary-card">
-      <div class="summary-label">Total Requisições</div>
+      <div class="summary-label">Total Requests</div>
       <div class="summary-value c-blue" id="totalRequests">—</div>
     </div>
     <div class="summary-card">
-      <div class="summary-label">Tokens Entrada</div>
+      <div class="summary-label">Input Tokens</div>
       <div class="summary-value c-green" id="totalTokensIn">—</div>
     </div>
     <div class="summary-card">
-      <div class="summary-label">Tokens Saída</div>
+      <div class="summary-label">Output Tokens</div>
       <div class="summary-value c-purple" id="totalTokensOut">—</div>
     </div>
     <div class="summary-card">
-      <div class="summary-label">Erros Totais</div>
+      <div class="summary-label">API Errors</div>
       <div class="summary-value c-red" id="totalErrors">—</div>
     </div>
     <div class="summary-card">
-      <div class="summary-label">Perfis Ativos</div>
-      <div class="summary-value c-orange" id="profilesEnabled">—</div>
-    </div>
-    <div class="summary-card">
-      <div class="summary-label">Perfis Online</div>
-      <div class="summary-value c-green" id="profilesOnline">—</div>
+      <div class="summary-label">Active Profile</div>
+      <div class="summary-value c-orange" id="activeProfileSummary">—</div>
     </div>
   </div>
 
-  <!-- Profile cards -->
+  <!-- ══════════════════════════════════════════════
+       ACCUMULATED TOKEN USAGE (HOUR, DAY, MONTH)
+  ══════════════════════════════════════════════ -->
+  <div class="token-section">
+    <div class="config-header">
+      <div class="config-title">
+        📈 Accumulated Token Usage
+      </div>
+      <div class="status-badge-active" id="tokenLastUpdated">
+        Checking tokens...
+      </div>
+    </div>
+
+    <!-- 4 Metric Cards -->
+    <div class="token-grid-cards">
+      <!-- This Hour -->
+      <div class="token-card">
+        <div class="token-card-header">
+          <span class="token-card-title">⏰ This Hour</span>
+          <span class="token-card-badge" id="cardHourPeriod">—</span>
+        </div>
+        <div class="token-card-total c-blue" id="cardHourTotal">0</div>
+        <div class="token-card-detail">
+          <div class="token-detail-row"><span>Input (Prompt):</span> <span class="val" id="cardHourIn">0</span></div>
+          <div class="token-detail-row"><span>Output (Completion):</span> <span class="val" id="cardHourOut">0</span></div>
+          <div class="token-detail-row"><span>Requests:</span> <span class="val" id="cardHourReqs">0</span></div>
+        </div>
+      </div>
+
+      <!-- Today -->
+      <div class="token-card">
+        <div class="token-card-header">
+          <span class="token-card-title">📅 Today</span>
+          <span class="token-card-badge" id="cardDayPeriod">—</span>
+        </div>
+        <div class="token-card-total c-green" id="cardDayTotal">0</div>
+        <div class="token-card-detail">
+          <div class="token-detail-row"><span>Input (Prompt):</span> <span class="val" id="cardDayIn">0</span></div>
+          <div class="token-detail-row"><span>Output (Completion):</span> <span class="val" id="cardDayOut">0</span></div>
+          <div class="token-detail-row"><span>Requests:</span> <span class="val" id="cardDayReqs">0</span></div>
+        </div>
+      </div>
+
+      <!-- This Month -->
+      <div class="token-card">
+        <div class="token-card-header">
+          <span class="token-card-title">🗓️ This Month</span>
+          <span class="token-card-badge" id="cardMonthPeriod">—</span>
+        </div>
+        <div class="token-card-total c-purple" id="cardMonthTotal">0</div>
+        <div class="token-card-detail">
+          <div class="token-detail-row"><span>Input (Prompt):</span> <span class="val" id="cardMonthIn">0</span></div>
+          <div class="token-detail-row"><span>Output (Completion):</span> <span class="val" id="cardMonthOut">0</span></div>
+          <div class="token-detail-row"><span>Requests:</span> <span class="val" id="cardMonthReqs">0</span></div>
+        </div>
+      </div>
+
+      <!-- All-Time Total -->
+      <div class="token-card">
+        <div class="token-card-header">
+          <span class="token-card-title">🌐 All-Time Total</span>
+          <span class="token-card-badge" style="background:rgba(245,158,11,0.15);color:var(--yellow);border-color:rgba(245,158,11,0.3)">TOTAL</span>
+        </div>
+        <div class="token-card-total c-orange" id="cardAllTotal">0</div>
+        <div class="token-card-detail">
+          <div class="token-detail-row"><span>Input (Prompt):</span> <span class="val" id="cardAllIn">0</span></div>
+          <div class="token-detail-row"><span>Output (Completion):</span> <span class="val" id="cardAllOut">0</span></div>
+          <div class="token-detail-row"><span>Requests:</span> <span class="val" id="cardAllReqs">0</span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Detail Tabs -->
+    <div class="token-tabs">
+      <button class="token-tab-btn active" id="tabBtn-hour" onclick="switchTokenTab('hour')">⏰ Hourly History</button>
+      <button class="token-tab-btn" id="tabBtn-day" onclick="switchTokenTab('day')">📅 Daily History</button>
+      <button class="token-tab-btn" id="tabBtn-month" onclick="switchTokenTab('month')">🗓️ Monthly History</button>
+      <button class="token-tab-btn" id="tabBtn-profile" onclick="switchTokenTab('profile')">👤 Usage by Account</button>
+      <button class="token-tab-btn" id="tabBtn-recent" onclick="switchTokenTab('recent')">⚡ Recent Requests</button>
+    </div>
+
+    <!-- Selected Tab Table -->
+    <div class="token-table-wrap" id="tokenTableWrap">
+      <div style="padding:20px;text-align:center;color:var(--muted)">Loading consumption data...</div>
+    </div>
+  </div>
+
+  <!-- Quota / Usage Section -->
   <div class="section-title">
-    👤 Perfis &amp; Estatísticas de Requisições
-    <span class="pill">Round-robin automático</span>
+    📊 Google Accounts Quota Monitor
+    <span class="pill" id="usageCachedLabel">Checking...</span>
   </div>
-  <div class="profiles-grid" id="profilesGrid"></div>
-
-  <!-- Usage section -->
-  <div class="usage-section">
-    <div class="section-title">
-      📊 Quota AGY — idêntico ao <code style="font-size:.8rem;background:var(--surface2);padding:2px 6px;border-radius:4px;">/usage</code>
-      <span class="pill" id="usageCachedLabel">—</span>
-    </div>
-    <div class="usage-grid" id="usageGrid">
-      <!-- populated by JS -->
-    </div>
+  <div class="usage-grid" id="usageGrid">
+    <!-- Populated by JS -->
   </div>
 
   <footer>
-    AGY Multi-Profile Dashboard &mdash; porta 80 &bull;
-    API: <a href="http://127.0.0.1:8080/v1/profiles/enabled" target="_blank">/v1/profiles/enabled</a>
-    &bull; cache TTL 60s
+    Antigravity API Service &bull; Endpoints: <code>/v1/chat/completions</code> &bull; <code>/v1/models</code> &bull; <code>/v1/health</code>
   </footer>
 
   <script>
+    let privacyMode = true; // Enabled by default to protect sensitive emails
+    let currentConfig = {
+      active_profile: 'p1',
+      active_effort: 'low',
+      active_model: 'gemini-3.8-flash-low'
+    };
+    let profilesList = [];
     let autoRefreshTimer = null;
 
-    // Tracks the current toggle state (before saving)
-    // { p1: true, p2: false, p3: true }
-    let pendingEnabled = {};
-    let savedEnabled   = {};
-    let isDirty = false;
+    function togglePrivacy() {
+      privacyMode = !privacyMode;
+      const btn = document.getElementById('privacyBtn');
+      const text = document.getElementById('privacyText');
+      if (privacyMode) {
+        btn.classList.add('active');
+        text.textContent = 'Privacy: ON';
+      } else {
+        btn.classList.remove('active');
+        text.textContent = 'Privacy: OFF';
+      }
+      renderConfigUI();
+      if (tokenData) renderTokenTable();
+      loadUsage(false);
+    }
 
-    /* ── helpers ── */
+    function maskEmail(email) {
+      if (!email) return '';
+      if (!privacyMode) return email;
+      const parts = email.split('@');
+      if (parts.length < 2) return '••••••••';
+      const user = parts[0];
+      const domain = parts[1];
+      if (user.length <= 3) return '••••@' + domain;
+      const masked = user.substring(0, 2) + '••••' + user.substring(user.length - 1);
+      return masked + '@' + domain;
+    }
+
+    function formatProfileName(name, id) {
+      if (!name) return `Profile ${id ? id.toUpperCase() : ''}`;
+      return name.replace(/^Perfil\\s+/i, 'Profile ');
+    }
+
     function fmt(n) {
       if (n == null) return '—';
       if (n >= 1e6) return (n/1e6).toFixed(1)+'M';
@@ -576,25 +719,12 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       return 'lo';
     }
 
-    function tokenExpiryHtml(expiry) {
-      if (!expiry) return '<div class="token-badge expired">⚠ Sem token</div>';
-      const exp = new Date(expiry), now = new Date();
-      const diffMin = Math.floor((exp - now) / 60000);
-      if (diffMin < 0)
-        return `<div class="token-badge expired">✗ Token expirado (${Math.abs(diffMin)}min atrás)</div>`;
-      if (diffMin < 10)
-        return `<div class="token-badge expiring">⚠ Expira em ${diffMin}min</div>`;
-      const h = Math.floor(diffMin/60), m = diffMin%60;
-      const label = h > 0 ? `${h}h ${m}min` : `${m}min`;
-      return `<div class="token-badge valid">✓ Token válido — expira em ${label}</div>`;
-    }
-
     function resetLabel(isoStr) {
       if (!isoStr) return '';
       const d = new Date(isoStr);
       const now = new Date();
       const diffMs = d - now;
-      if (diffMs <= 0) return 'Reset já passou';
+      if (diffMs <= 0) return 'Reset imminent';
       const totalMin = Math.floor(diffMs / 60000);
       const days = Math.floor(totalMin / 1440);
       const hrs  = Math.floor((totalMin % 1440) / 60);
@@ -602,386 +732,499 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       let parts = [];
       if (days) parts.push(`${days}d`);
       if (hrs)  parts.push(`${hrs}h`);
-      if (mins && !days) parts.push(`${mins}min`);
-      return `Reset em ${parts.join(' ')} (${d.toLocaleString('pt-BR')})`;
+      if (mins && !days) parts.push(`${mins}m`);
+      return `Reset in ${parts.join(' ')}`;
     }
 
-    /* ════════════════════════════════════════════
-       PROFILE MANAGER
-    ════════════════════════════════════════════ */
+    function showToast(msg, isSuccess = true) {
+      const toast = document.getElementById('configToast');
+      toast.className = `feedback-toast show ${isSuccess ? 'success' : 'error'}`;
+      toast.innerHTML = (isSuccess ? '✓ ' : '✗ ') + msg;
+      setTimeout(() => {
+        toast.className = 'feedback-toast';
+      }, 4000);
+    }
 
-    function renderManager(data) {
-      const profiles = data.profiles || [];
-
-      // Sync saved state
-      savedEnabled = {};
-      profiles.forEach(p => { savedEnabled[p.id] = p.enabled; });
-
-      // Only init pending if not dirty (don't overwrite unsaved changes)
-      if (!isDirty) {
-        pendingEnabled = { ...savedEnabled };
+    /* ── LOAD CONFIG ── */
+    async function loadConfig() {
+      try {
+        const resp = await fetch('/api/config');
+        const data = await resp.json();
+        currentConfig = data;
+        renderConfigUI();
+      } catch (e) {
+        console.error('Error loading config:', e);
       }
-
-      updateManagerUI();
     }
 
-    let dynamicProfileMeta = {
-      p1: { name: 'Perfil 1', email: 'perfil1@exemplo.com' },
-      p2: { name: 'Perfil 2', email: 'perfil2@exemplo.com' },
-      p3: { name: 'Perfil 3', email: 'perfil3@exemplo.com' },
-    };
+    /* ── RENDER CONFIG UI ── */
+    function renderConfigUI() {
+      const activePid = currentConfig.active_profile || 'p1';
+      const activeEff = currentConfig.active_effort || 'low';
 
-    function updateManagerUI() {
-      const profiles = Object.keys(pendingEnabled).length ? Object.keys(pendingEnabled) : ['p1','p2','p3'];
-      const profileMeta = dynamicProfileMeta;
+      const effortNames = {
+        low: 'Low',
+        medium: 'Medium',
+        high: 'High',
+      };
 
-      const enabledCount = Object.values(pendingEnabled).filter(Boolean).length;
+      // Get profile meta dynamically from profilesList or defaults
+      const pMap = {};
+      profilesList.forEach(p => {
+        pMap[p.id] = {
+          name: formatProfileName(p.name, p.id),
+          email: p.email
+        };
+      });
 
-      // Pill
-      document.getElementById('managerPill').textContent =
-        enabledCount === 0 ? '⚠ nenhum ativo'
-        : enabledCount === 3 ? 'todos ativos'
-        : `${enabledCount}/3 ativos`;
+      const activeProfileMeta = pMap[activePid] || {
+        name: `Profile ${activePid.toUpperCase()}`,
+        email: ''
+      };
 
-      // Warning
-      const warn = document.getElementById('noProfilesWarn');
-      warn.classList.toggle('visible', enabledCount === 0);
+      // Header Badge
+      document.getElementById('activeStatusBadge').innerHTML =
+        `★ Active API: <b>${activeProfileMeta.name}</b> &bull; <b>${effortNames[activeEff] || activeEff}</b>`;
+      document.getElementById('activeProfileSummary').textContent =
+        `${activeProfileMeta.name} (${activeEff.toUpperCase()})`;
 
-      // Profiles grid
-      const container = document.getElementById('managerProfiles');
-      container.innerHTML = profiles.map(pid => {
-        const meta    = profileMeta[pid];
-        const enabled = !!pendingEnabled[pid];
-        const activeClass = enabled ? `${pid}-active` : '';
+      // Profile grid
+      const pGrid = document.getElementById('profileSelectGrid');
+      const profileIds = profilesList.length ? profilesList.map(p => p.id) : ['p1', 'p2', 'p3'];
+
+      pGrid.innerHTML = profileIds.map(pid => {
+        const isActive = pid === activePid;
+        const meta = pMap[pid] || { name: `Profile ${pid.toUpperCase()}`, email: '' };
         return `
-          <div class="manager-profile-row enabled-row ${activeClass}" onclick="togglePending('${pid}')">
-            <div class="manager-profile-info">
-              <div class="mgr-avatar ${pid} ${!enabled ? 'disabled-avatar' : ''}">${pid.toUpperCase()}</div>
+          <div class="profile-select-card ${isActive ? 'active' : ''}" onclick="selectProfile('${pid}')">
+            <div class="card-left">
+              <div class="p-avatar ${pid}">${pid.toUpperCase()}</div>
               <div>
-                <div class="mgr-name" style="color:${enabled ? 'var(--text)' : 'var(--muted)'}">${meta.name}</div>
-                <div class="mgr-email">${meta.email}</div>
-                <span class="mgr-status-tag ${enabled ? 'tag-on' : 'tag-off'}">
-                  ${enabled ? '● ATIVO no round-robin' : '○ INATIVO'}
-                </span>
+                <div class="p-meta-name">${meta.name}</div>
+                <div class="p-meta-email">${maskEmail(meta.email)}</div>
               </div>
             </div>
-            <label class="toggle" onclick="event.stopPropagation()">
-              <input type="checkbox" id="toggle-${pid}" ${enabled ? 'checked' : ''}
-                     onchange="togglePendingDirect('${pid}', this.checked)">
-              <span class="toggle-slider"></span>
-            </label>
-          </div>`;
+            <div class="active-tag">${isActive ? '★ ACTIVE' : 'ACTIVATE'}</div>
+          </div>
+        `;
       }).join('');
 
-      // Dirty state → save button glow
-      checkDirty();
-
-      // Update summary
-      document.getElementById('profilesEnabled').textContent =
-        `${enabledCount} / 3`;
+      // Effort cards
+      ['low', 'medium', 'high'].forEach(eff => {
+        const card = document.getElementById(`card-effort-${eff}`);
+        const tag = document.getElementById(`tag-effort-${eff}`);
+        const isEffActive = eff === activeEff;
+        card.className = `effort-card ${isEffActive ? 'active ' + eff : ''}`;
+        tag.textContent = isEffActive ? '★ ACTIVE' : 'SELECT';
+      });
     }
 
-    function togglePending(pid) {
-      pendingEnabled[pid] = !pendingEnabled[pid];
-      isDirty = true;
-      updateManagerUI();
-    }
-
-    function togglePendingDirect(pid, val) {
-      pendingEnabled[pid] = val;
-      isDirty = true;
-      updateManagerUI();
-    }
-
-    function selectAll() {
-      ['p1','p2','p3'].forEach(p => { pendingEnabled[p] = true; });
-      isDirty = true;
-      updateManagerUI();
-    }
-
-    function selectNone() {
-      ['p1','p2','p3'].forEach(p => { pendingEnabled[p] = false; });
-      isDirty = true;
-      updateManagerUI();
-    }
-
-    function checkDirty() {
-      const changed = JSON.stringify(pendingEnabled) !== JSON.stringify(savedEnabled);
-      isDirty = changed;
-      const saveBtn = document.getElementById('saveBtn');
-      if (changed) {
-        saveBtn.style.boxShadow = '0 0 0 2px rgba(79,142,247,.5)';
-        saveBtn.textContent = '💾 Salvar alterações';
-      } else {
-        saveBtn.style.boxShadow = '';
-        saveBtn.textContent = '💾 Salvar';
-      }
-    }
-
-    async function saveEnabled() {
-      const saveBtn = document.getElementById('saveBtn');
-      const feedback = document.getElementById('saveFeedback');
-      saveBtn.disabled = true;
-      feedback.className = 'save-feedback';
-      feedback.style.display = 'none';
-
-      const enabledIds = Object.entries(pendingEnabled)
-        .filter(([,v]) => v)
-        .map(([k]) => k);
-
+    /* ── SAVE CONFIG ACTIONS ── */
+    async function selectProfile(pid) {
+      if (currentConfig.active_profile === pid) return;
       try {
-        const resp = await fetch('/api/profiles/enabled', {
+        const resp = await fetch('/api/config', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ enabled: enabledIds }),
+          body: JSON.stringify({ active_profile: pid })
         });
-        const data = await resp.json();
-        if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
-
-        // Confirm saved
-        savedEnabled = { ...pendingEnabled };
-        isDirty = false;
-        checkDirty();
-
-        const n = data.total_enabled;
-        feedback.className = 'save-feedback visible';
-        feedback.innerHTML = `✓ Salvo! ${n === 0 ? 'Nenhum perfil ativo (usando fallback p1)' : `${n} perfil(is) ativo(s): ${data.enabled_ids.join(', ')}`}`;
-        setTimeout(() => { feedback.className = 'save-feedback'; }, 4000);
-      } catch(e) {
-        feedback.className = 'save-feedback visible err';
-        feedback.innerHTML = `✗ Erro ao salvar: ${e.message}`;
-        setTimeout(() => { feedback.className = 'save-feedback'; }, 5000);
-      } finally {
-        saveBtn.disabled = false;
-      }
-    }
-
-    /* ── RENDER PROFILE CARDS ── */
-    function renderProfiles(data) {
-      const profiles = data.profiles || [];
-      if (profiles.length) {
-        profiles.forEach(p => {
-          dynamicProfileMeta[p.id] = { name: p.name, email: p.email };
-        });
-        updateManagerUI();
-      }
-      const totalReqs = profiles.reduce((a,p) => a + (p.stats.requests||0), 0);
-      const totalIn   = profiles.reduce((a,p) => a + (p.stats.tokens_in||0), 0);
-      const totalOut  = profiles.reduce((a,p) => a + (p.stats.tokens_out||0), 0);
-      const totalErr  = profiles.reduce((a,p) => a + (p.stats.errors||0), 0);
-      const online    = profiles.filter(p => p.token?.token_valid).length;
-
-      document.getElementById('totalRequests').textContent = fmt(totalReqs);
-      document.getElementById('totalTokensIn').textContent = fmt(totalIn);
-      document.getElementById('totalTokensOut').textContent = fmt(totalOut);
-      document.getElementById('totalErrors').textContent = fmt(totalErr);
-      document.getElementById('profilesOnline').textContent = `${online} / ${profiles.length}`;
-
-      const grid = document.getElementById('profilesGrid');
-      grid.innerHTML = profiles.map(p => {
-        const pid = p.id;
-        const s   = p.stats || {};
-        const tok = p.token || {};
-        const reqs = s.requests || 0;
-        const errPct = reqs > 0 ? Math.round(((s.errors||0)/reqs)*100) : 0;
-        const sharePct = totalReqs > 0 ? Math.min(100, Math.round((reqs/totalReqs)*100)) : 0;
-        const statusCls = !tok.token_valid ? 'err'
-          : (tok.expiry && (new Date(tok.expiry)-new Date() < 600000) ? 'warn' : 'ok');
-        const isEnabled = !!savedEnabled[pid];
-        return `
-          <div class="profile-card" style="${!isEnabled ? 'opacity:.55;' : ''}">
-            <div class="card-header">
-              <div class="avatar ${pid}">${pid.toUpperCase()}</div>
-              <div class="card-title">
-                <div class="profile-name">${p.name} ${!isEnabled ? '<span style="font-size:.65rem;color:var(--muted);font-weight:400">(inativo no round-robin)</span>' : ''}</div>
-                <div class="profile-email" title="${p.email}">${p.email}</div>
-              </div>
-              <div class="status-dot ${statusCls}"></div>
-            </div>
-            <div class="card-body">
-              <div class="stat-row">
-                <span class="stat-label">🔢 Requisições</span>
-                <span class="stat-value sv-blue">${fmt(reqs)}</span>
-              </div>
-              <div class="stat-row">
-                <span class="stat-label">📥 Tokens entrada</span>
-                <span class="stat-value sv-tok">${fmt(s.tokens_in||0)}</span>
-              </div>
-              <div class="stat-row">
-                <span class="stat-label">📤 Tokens saída</span>
-                <span class="stat-value sv-tok">${fmt(s.tokens_out||0)}</span>
-              </div>
-              <div class="stat-row">
-                <span class="stat-label">⚠ Erros</span>
-                <span class="stat-value sv-err">${fmt(s.errors||0)}${reqs>0?' <small style="color:var(--muted)">('+errPct+'%)</small>':''}</span>
-              </div>
-              <div class="stat-row" style="border:none">
-                <span class="stat-label">🕐 Último uso</span>
-                <span class="stat-value" style="font-size:.73rem;color:var(--muted)">${s.last_used ? new Date(s.last_used).toLocaleTimeString('pt-BR') : '—'}</span>
-              </div>
-              <div class="mini-bar-wrap">
-                <div class="mini-bar-labels"><span>Share de uso</span><span>${sharePct}%</span></div>
-                <div class="mini-bar-bg"><div class="mini-bar-fill ${pid}" style="width:${sharePct}%"></div></div>
-              </div>
-              ${tokenExpiryHtml(tok.expiry)}
-            </div>
-          </div>`;
-      }).join('');
-    }
-
-    /* ── RENDER USAGE SECTION ── */
-    function renderUsage(data) {
-      const pu = data.profiles_usage || [];
-      const grid = document.getElementById('usageGrid');
-
-      // update cache label
-      const anyFresh = pu.some(p => !p.cached);
-      document.getElementById('usageCachedLabel').textContent =
-        anyFresh ? 'dados frescos' : 'cache 60s';
-
-      grid.innerHTML = pu.map(p => {
-        const pid = p.id || '';
-        const groups = p.groups || [];
-
-        if (!p.ok && !groups.length) {
-          return `
-            <div class="usage-card">
-              <div class="usage-card-header">
-                <div class="usage-avatar avatar ${pid}">${pid.toUpperCase()}</div>
-                <div class="usage-card-meta">
-                  <div class="usage-card-name">${p.name || pid}</div>
-                  <div class="usage-card-email">${p.email || ''}</div>
-                </div>
-              </div>
-              <div class="usage-error">❌ ${p.error || 'Erro ao buscar quota'}</div>
-            </div>`;
+        const res = await resp.json();
+        if (res.ok) {
+          currentConfig.active_profile = pid;
+          renderConfigUI();
+          showToast(`Account activated: Profile ${pid.toUpperCase()} is now serving all API requests.`);
+          loadProfiles();
+        } else {
+          showToast('Error switching profile: ' + (res.error || 'Failed'), false);
         }
+      } catch (e) {
+        showToast('Connection error saving profile: ' + e.message, false);
+      }
+    }
 
-        const groupsHtml = groups.map(g => {
-          const bucketsHtml = (g.buckets || []).map(b => {
-            const frac = b.remaining_fraction ?? 0;
-            const disabled = b.disabled === true;
-            const p100 = disabled ? 100 : Math.round(frac * 100);
-            const displayPct = disabled ? 'desativado' : `${p100}%`;
-            const cls = disabled ? 'dis' : barClass(p100);
-            const exhausted = !disabled && p100 === 0;
+    async function selectEffort(effort) {
+      if (currentConfig.active_effort === effort) return;
+      try {
+        const resp = await fetch('/api/config', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ active_effort: effort })
+        });
+        const res = await resp.json();
+        if (res.ok) {
+          currentConfig.active_effort = effort;
+          currentConfig.active_model = `gemini-3.8-flash-${effort}`;
+          renderConfigUI();
+          showToast(`Reasoning effort changed to Gemini 3.8 Flash (${effort.toUpperCase()}).`);
+        } else {
+          showToast('Error switching reasoning effort: ' + (res.error || 'Failed'), false);
+        }
+      } catch (e) {
+        showToast('Connection error saving model: ' + e.message, false);
+      }
+    }
+
+    /* ── LOAD PROFILES STATS ── */
+    async function loadProfiles() {
+      try {
+        const resp = await fetch('/api/profiles');
+        const data = await resp.json();
+        profilesList = data.profiles || [];
+        const totalReqs = profilesList.reduce((a,p) => a + (p.stats.requests||0), 0);
+        const totalIn   = profilesList.reduce((a,p) => a + (p.stats.tokens_in||0), 0);
+        const totalOut  = profilesList.reduce((a,p) => a + (p.stats.tokens_out||0), 0);
+        const totalErr  = profilesList.reduce((a,p) => a + (p.stats.errors||0), 0);
+
+        document.getElementById('totalRequests').textContent = fmt(totalReqs);
+        document.getElementById('totalTokensIn').textContent = fmt(totalIn);
+        document.getElementById('totalTokensOut').textContent = fmt(totalOut);
+        document.getElementById('totalErrors').textContent = fmt(totalErr);
+
+        renderConfigUI();
+      } catch (e) {
+        console.error('Error loading profiles:', e);
+      }
+    }
+
+    /* ── LOAD USAGE QUOTAS ── */
+    async function loadUsage(force = false) {
+      const grid = document.getElementById('usageGrid');
+      const cachedLabel = document.getElementById('usageCachedLabel');
+      try {
+        const resp = await fetch(`/api/usage?force=${force}`);
+        const data = await resp.json();
+        const items = data.profiles_usage || [];
+
+        cachedLabel.textContent = `Updated at ${new Date().toLocaleTimeString('en-US')}`;
+
+        grid.innerHTML = items.map(p => {
+          const pid = p.id;
+          const isActive = pid === currentConfig.active_profile;
+          const groups = p.groups || [];
+
+          const groupsHtml = groups.map(g => {
+            const bucketsHtml = (g.buckets || []).map(b => {
+              const pVal = pct(b.remaining_fraction);
+              const bCls = barClass(pVal);
+              const rLabel = resetLabel(b.reset_time);
+              return `
+                <div class="bucket">
+                  <div class="bucket-header">
+                    <span class="bucket-name">${b.name}</span>
+                    <span class="bucket-pct" style="color:var(--${bCls === 'hi' ? 'green' : bCls === 'med' ? 'yellow' : 'red'})">
+                      ${pVal != null ? pVal + '%' : '—'}
+                    </span>
+                  </div>
+                  <div class="bar-bg">
+                    <div class="bar-fill ${bCls}" style="width:${pVal != null ? pVal : 0}%"></div>
+                  </div>
+                  <div class="bucket-desc">${b.description || ''}</div>
+                  ${rLabel ? `<div class="bucket-reset">${rLabel}</div>` : ''}
+                </div>
+              `;
+            }).join('');
 
             return `
-              <div class="bucket">
-                <div class="bucket-header">
-                  <span class="bucket-name">${b.name}${disabled ? '<span class="tag-disabled">DISABLED</span>' : ''}${exhausted ? '<span class="tag-exhausted">ESGOTADO</span>' : ''}</span>
-                  <span class="bucket-pct" style="color:${disabled?'var(--muted)':exhausted?'var(--red)':p100>=50?'var(--green)':p100>=20?'var(--yellow)':'var(--red)'}">${displayPct}</span>
+              <div class="usage-group">
+                <div class="usage-group-name">
+                  ${g.name === 'Gemini Models' ? '🔵' : '🟣'} ${g.name}
                 </div>
-                <div class="bar-bg">
-                  <div class="bar-fill ${cls}" style="width:${disabled?100:p100}%"></div>
-                </div>
-                <div class="bucket-desc">${b.description || ''}</div>
-                ${b.reset_time ? `<div class="bucket-reset">🕐 ${resetLabel(b.reset_time)}</div>` : ''}
-              </div>`;
+                ${bucketsHtml}
+              </div>
+            `;
           }).join('');
 
           return `
-            <div class="usage-group">
-              <div class="usage-group-name">
-                ${g.name === 'Gemini Models' ? '🔵' : '🟣'} ${g.name}
+            <div class="usage-card ${isActive ? 'active-card' : ''}">
+              <div class="usage-card-header">
+                <div class="usage-card-left">
+                  <div class="usage-avatar p-avatar ${pid}">${pid.toUpperCase()}</div>
+                  <div>
+                    <div class="usage-card-name">${formatProfileName(p.name, pid)} ${isActive ? '<span style="color:var(--green);font-size:.7rem">(ACTIVE IN API)</span>' : ''}</div>
+                    <div class="usage-card-email">${maskEmail(p.email)}</div>
+                  </div>
+                </div>
+                ${!isActive ? `<button class="btn-refresh" style="padding:6px 12px;font-size:.75rem;" onclick="selectProfile('${pid}')">Activate</button>` : '<span style="color:var(--green);font-size:.8rem;font-weight:700">✓ In Use</span>'}
               </div>
-              <div class="usage-group-models">${g.description || ''}</div>
-              ${bucketsHtml}
-            </div>`;
-        }).join('<hr style="border:none;border-top:1px solid var(--border);margin:0 0 16px 0">');
-
-        const descHtml = p.description
-          ? `<div class="usage-desc">${p.description}</div>`
-          : '';
-
-        return `
-          <div class="usage-card">
-            <div class="usage-card-header">
-              <div class="usage-avatar avatar ${pid}">${pid.toUpperCase()}</div>
-              <div class="usage-card-meta">
-                <div class="usage-card-name">${p.name || pid}</div>
-                <div class="usage-card-email">${p.email || ''}</div>
+              <div class="usage-groups">
+                ${groupsHtml || '<div style="padding:20px;color:var(--muted)">No quota data available</div>'}
               </div>
             </div>
-            ${descHtml}
-            <div class="usage-groups">${groupsHtml}</div>
-          </div>`;
-      }).join('');
-    }
+          `;
+        }).join('');
 
-    /* ── LOADING SKELETON FOR USAGE ── */
-    function showUsageLoading() {
-      const grid = document.getElementById('usageGrid');
-      grid.innerHTML = ['p1','p2','p3'].map(pid => `
-        <div class="usage-card">
-          <div class="usage-card-header">
-            <div class="usage-avatar avatar ${pid}">${pid.toUpperCase()}</div>
-            <div class="usage-card-meta">
-              <div class="usage-card-name">Carregando...</div>
-            </div>
-          </div>
-          <div class="usage-loading">
-            <span class="usage-spinner"></span> Buscando quota no AGY CLI…
-          </div>
-        </div>`).join('');
-    }
-
-    /* ── MAIN LOAD ── */
-    async function loadAll(force = false) {
-      const btn = document.getElementById('refreshBtn');
-      const banner = document.getElementById('errorBanner');
-      btn.classList.add('loading');
-      btn.disabled = true;
-      banner.style.display = 'none';
-
-      if (force) showUsageLoading();
-
-      try {
-        const forceQ = force ? '?force=true' : '';
-        const [profResp, usageResp, enabledResp] = await Promise.all([
-          fetch('/api/profiles',         { cache: 'no-store' }),
-          fetch('/api/usage' + forceQ,   { cache: 'no-store' }),
-          fetch('/api/profiles/enabled', { cache: 'no-store' }),
-        ]);
-
-        if (enabledResp.ok) {
-          const enabledData = await enabledResp.json();
-          renderManager(enabledData);
-        }
-
-        if (profResp.ok) {
-          const profData = await profResp.json();
-          renderProfiles(profData);
-        }
-
-        if (usageResp.ok) {
-          const usageData = await usageResp.json();
-          renderUsage(usageData);
-        } else {
-          throw new Error(`Usage HTTP ${usageResp.status}`);
-        }
-
-        document.getElementById('lastUpdate').textContent =
-          'Atualizado: ' + new Date().toLocaleTimeString('pt-BR');
-
-      } catch(err) {
-        banner.textContent = '❌ Erro: ' + err.message;
-        banner.style.display = 'block';
-      } finally {
-        btn.classList.remove('loading');
-        btn.disabled = false;
+      } catch (e) {
+        console.error('Error loading usage:', e);
       }
     }
 
-    function setAutoRefresh(seconds) {
-      if (autoRefreshTimer) { clearInterval(autoRefreshTimer); autoRefreshTimer = null; }
-      const s = parseInt(seconds);
-      if (s > 0) autoRefreshTimer = setInterval(() => loadAll(false), s * 1000);
+    /* ── TOKEN TRACKING LOGIC ── */
+    let currentTokenTab = 'hour';
+    let tokenData = null;
+
+    function fmtNum(n) {
+      if (n == null || isNaN(n)) return '0';
+      return Number(n).toLocaleString('en-US');
     }
 
-    // init
-    showUsageLoading();
-    loadAll(true);
+    async function loadTokenUsage() {
+      const updatedBadge = document.getElementById('tokenLastUpdated');
+      try {
+        const resp = await fetch('/api/token_usage');
+        const data = await resp.json();
+        if (!data || !data.ok) return;
+        tokenData = data;
+
+        updatedBadge.innerHTML = `✓ Updated: ${new Date().toLocaleTimeString('en-US')}`;
+
+        // 1. Hour card
+        const h = data.current_hour || {};
+        document.getElementById('cardHourTotal').textContent = fmtNum(h.total_tokens);
+        document.getElementById('cardHourIn').textContent = fmtNum(h.prompt_tokens);
+        document.getElementById('cardHourOut').textContent = fmtNum(h.completion_tokens);
+        document.getElementById('cardHourReqs').textContent = fmtNum(h.requests);
+        document.getElementById('cardHourPeriod').textContent = h.period ? h.period.replace(' UTC', '') : 'Now';
+
+        // 2. Day card
+        const d = data.today || {};
+        document.getElementById('cardDayTotal').textContent = fmtNum(d.total_tokens);
+        document.getElementById('cardDayIn').textContent = fmtNum(d.prompt_tokens);
+        document.getElementById('cardDayOut').textContent = fmtNum(d.completion_tokens);
+        document.getElementById('cardDayReqs').textContent = fmtNum(d.requests);
+        document.getElementById('cardDayPeriod').textContent = d.period || 'Today';
+
+        // 3. Month card
+        const m = data.this_month || {};
+        document.getElementById('cardMonthTotal').textContent = fmtNum(m.total_tokens);
+        document.getElementById('cardMonthIn').textContent = fmtNum(m.prompt_tokens);
+        document.getElementById('cardMonthOut').textContent = fmtNum(m.completion_tokens);
+        document.getElementById('cardMonthReqs').textContent = fmtNum(m.requests);
+        document.getElementById('cardMonthPeriod').textContent = m.period || 'Month';
+
+        // 4. All-time card
+        const at = data.all_time || {};
+        document.getElementById('cardAllTotal').textContent = fmtNum(at.total_tokens);
+        document.getElementById('cardAllIn').textContent = fmtNum(at.prompt_tokens);
+        document.getElementById('cardAllOut').textContent = fmtNum(at.completion_tokens);
+        document.getElementById('cardAllReqs').textContent = fmtNum(at.requests);
+
+        // Keep Summary Bar in sync with accumulated token_tracker numbers
+        if (at.requests) {
+          document.getElementById('totalRequests').textContent = fmt(at.requests);
+          document.getElementById('totalTokensIn').textContent = fmt(at.prompt_tokens);
+          document.getElementById('totalTokensOut').textContent = fmt(at.completion_tokens);
+        }
+
+        renderTokenTable();
+      } catch (e) {
+        console.error('Error loading token_usage:', e);
+        if (updatedBadge) updatedBadge.textContent = 'Error querying';
+      }
+    }
+
+    function switchTokenTab(tab) {
+      currentTokenTab = tab;
+      ['hour', 'day', 'month', 'profile', 'recent'].forEach(t => {
+        const btn = document.getElementById(`tabBtn-${t}`);
+        if (btn) {
+          if (t === tab) btn.classList.add('active');
+          else btn.classList.remove('active');
+        }
+      });
+      renderTokenTable();
+    }
+
+    function renderTokenTable() {
+      const wrap = document.getElementById('tokenTableWrap');
+      if (!tokenData) {
+        wrap.innerHTML = '<div style="padding:20px;text-align:center;color:var(--muted)">No consumption data recorded yet.</div>';
+        return;
+      }
+
+      if (currentTokenTab === 'hour') {
+        const list = tokenData.by_hour_list || [];
+        if (!list.length) {
+          wrap.innerHTML = '<div style="padding:20px;text-align:center;color:var(--muted)">No hourly history recorded.</div>';
+          return;
+        }
+        wrap.innerHTML = `
+          <table class="token-table">
+            <thead>
+              <tr>
+                <th>Time (UTC)</th>
+                <th class="num">Requests</th>
+                <th class="num">Input Tokens</th>
+                <th class="num">Output Tokens</th>
+                <th class="num">Total Tokens</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${list.map(r => `
+                <tr>
+                  <td><b>${r.period}</b></td>
+                  <td class="num">${fmtNum(r.requests)}</td>
+                  <td class="num" style="color:var(--green)">${fmtNum(r.prompt_tokens)}</td>
+                  <td class="num" style="color:var(--purple)">${fmtNum(r.completion_tokens)}</td>
+                  <td class="num c-blue"><b>${fmtNum(r.total_tokens)}</b></td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        `;
+      } else if (currentTokenTab === 'day') {
+        const list = tokenData.by_day_list || [];
+        if (!list.length) {
+          wrap.innerHTML = '<div style="padding:20px;text-align:center;color:var(--muted)">No daily history recorded.</div>';
+          return;
+        }
+        wrap.innerHTML = `
+          <table class="token-table">
+            <thead>
+              <tr>
+                <th>Date</th>
+                <th class="num">Requests</th>
+                <th class="num">Input Tokens</th>
+                <th class="num">Output Tokens</th>
+                <th class="num">Total Tokens</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${list.map(r => `
+                <tr>
+                  <td><b>${r.period}</b></td>
+                  <td class="num">${fmtNum(r.requests)}</td>
+                  <td class="num" style="color:var(--green)">${fmtNum(r.prompt_tokens)}</td>
+                  <td class="num" style="color:var(--purple)">${fmtNum(r.completion_tokens)}</td>
+                  <td class="num c-green"><b>${fmtNum(r.total_tokens)}</b></td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        `;
+      } else if (currentTokenTab === 'month') {
+        const list = tokenData.by_month_list || [];
+        if (!list.length) {
+          wrap.innerHTML = '<div style="padding:20px;text-align:center;color:var(--muted)">No monthly history recorded.</div>';
+          return;
+        }
+        wrap.innerHTML = `
+          <table class="token-table">
+            <thead>
+              <tr>
+                <th>Month</th>
+                <th class="num">Requests</th>
+                <th class="num">Input Tokens</th>
+                <th class="num">Output Tokens</th>
+                <th class="num">Total Tokens</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${list.map(r => `
+                <tr>
+                  <td><b>${r.period}</b></td>
+                  <td class="num">${fmtNum(r.requests)}</td>
+                  <td class="num" style="color:var(--green)">${fmtNum(r.prompt_tokens)}</td>
+                  <td class="num" style="color:var(--purple)">${fmtNum(r.completion_tokens)}</td>
+                  <td class="num c-purple"><b>${fmtNum(r.total_tokens)}</b></td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        `;
+      } else if (currentTokenTab === 'profile') {
+        const prof = tokenData.by_profile || {};
+        const pids = profilesList.length ? profilesList.map(p => p.id) : ['p1', 'p2', 'p3'];
+        const pMap = {};
+        profilesList.forEach(p => { pMap[p.id] = p; });
+
+        wrap.innerHTML = `
+          <table class="token-table">
+            <thead>
+              <tr>
+                <th>Account / Profile</th>
+                <th>Email</th>
+                <th class="num">Requests</th>
+                <th class="num">Input Tokens</th>
+                <th class="num">Output Tokens</th>
+                <th class="num">Total Tokens</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${pids.map(pid => {
+                const p = prof[pid] || {};
+                const m = pMap[pid] || { name: `Profile ${pid.toUpperCase()}`, email: '' };
+                return `
+                  <tr>
+                    <td><b>${formatProfileName(m.name, pid)} (${pid.toUpperCase()})</b></td>
+                    <td style="color:var(--muted);font-size:0.8rem">${maskEmail(m.email)}</td>
+                    <td class="num">${fmtNum(p.requests)}</td>
+                    <td class="num" style="color:var(--green)">${fmtNum(p.prompt_tokens)}</td>
+                    <td class="num" style="color:var(--purple)">${fmtNum(p.completion_tokens)}</td>
+                    <td class="num c-orange"><b>${fmtNum(p.total_tokens)}</b></td>
+                  </tr>
+                `;
+              }).join('')}
+            </tbody>
+          </table>
+        `;
+      } else if (currentTokenTab === 'recent') {
+        const recent = tokenData.recent_requests || [];
+        if (!recent.length) {
+          wrap.innerHTML = '<div style="padding:20px;text-align:center;color:var(--muted)">No recent requests.</div>';
+          return;
+        }
+        wrap.innerHTML = `
+          <table class="token-table">
+            <thead>
+              <tr>
+                <th>Timestamp</th>
+                <th>Account</th>
+                <th>Model</th>
+                <th class="num">Input</th>
+                <th class="num">Output</th>
+                <th class="num">Total</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${recent.map(r => {
+                const dt = new Date(r.timestamp);
+                const timeStr = !isNaN(dt.getTime()) ? dt.toLocaleTimeString('en-US') : r.timestamp;
+                return `
+                  <tr>
+                    <td>${timeStr}</td>
+                    <td><b>${(r.profile || 'P1').toUpperCase()}</b></td>
+                    <td style="font-family:monospace;font-size:0.75rem">${r.model || 'gemini-3.8-flash'}</td>
+                    <td class="num" style="color:var(--green)">${fmtNum(r.prompt_tokens)}</td>
+                    <td class="num" style="color:var(--purple)">${fmtNum(r.completion_tokens)}</td>
+                    <td class="num"><b>${fmtNum(r.total_tokens)}</b></td>
+                  </tr>
+                `;
+              }).join('')}
+            </tbody>
+          </table>
+        `;
+      }
+    }
+
+    async function loadAll(force = false) {
+      const btn = document.getElementById('refreshBtn');
+      btn.classList.add('loading');
+      document.getElementById('lastUpdate').textContent = 'Updating...';
+      await Promise.all([loadConfig(), loadProfiles(), loadUsage(force), loadTokenUsage()]);
+      document.getElementById('lastUpdate').textContent = `Updated at ${new Date().toLocaleTimeString('en-US')}`;
+      btn.classList.remove('loading');
+    }
+
+    function setAutoRefresh(sec) {
+      if (autoRefreshTimer) clearInterval(autoRefreshTimer);
+      const s = parseInt(sec);
+      if (s > 0) {
+        autoRefreshTimer = setInterval(() => loadAll(false), s * 1000);
+      }
+    }
+
+    // Initial load
+    loadAll(false);
     setAutoRefresh(30);
   </script>
 </body>
@@ -989,22 +1232,27 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 """
 
 # ---------------------------------------------------------------------------
-# Routes
+# Proxy Helpers
 # ---------------------------------------------------------------------------
 
-def _proxy(path, params=''):
-    url = f"{API_BASE}{path}{params}"
+def _proxy(endpoint: str, query: str = ""):
+    url = f"{API_BASE}{endpoint}{query}"
     try:
-        with urllib.request.urlopen(url, timeout=40) as resp:
+        req = urllib.request.Request(url, headers={"Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=35) as resp:
             return json.loads(resp.read().decode()), None
-    except urllib.error.URLError as e:
-        return None, str(e)
+    except urllib.error.HTTPError as e:
+        try:
+            err_body = json.loads(e.read().decode())
+        except Exception:
+            err_body = {"error": str(e)}
+        return None, err_body.get("error", str(e))
     except Exception as e:
         return None, str(e)
 
 
-def _proxy_post(path, body: dict):
-    url = f"{API_BASE}{path}"
+def _proxy_post(endpoint: str, body: dict):
+    url = f"{API_BASE}{endpoint}"
     try:
         payload = json.dumps(body).encode()
         req = urllib.request.Request(
@@ -1024,9 +1272,30 @@ def _proxy_post(path, body: dict):
         return None, str(e)
 
 
+# ---------------------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------------------
+
 @app.route("/")
 def index():
     return render_template_string(DASHBOARD_HTML)
+
+
+@app.route("/api/config", methods=["GET"])
+def api_get_config():
+    data, err = _proxy("/v1/config")
+    if err:
+        return jsonify({"error": err}), 502
+    return jsonify(data)
+
+
+@app.route("/api/config", methods=["POST"])
+def api_set_config():
+    body = request.get_json(force=True, silent=True) or {}
+    data, err = _proxy_post("/v1/config", body)
+    if err:
+        return jsonify({"error": err}), 502
+    return jsonify(data)
 
 
 @app.route("/api/profiles")
@@ -1037,29 +1306,20 @@ def api_profiles():
     return jsonify(data)
 
 
-@app.route("/api/profiles/enabled", methods=["GET"])
-def api_get_enabled():
-    data, err = _proxy("/v1/profiles/enabled")
-    if err:
-        return jsonify({"error": err, "profiles": []}), 502
-    return jsonify(data)
-
-
-@app.route("/api/profiles/enabled", methods=["POST"])
-def api_set_enabled():
-    body = request.get_json(force=True, silent=True) or {}
-    data, err = _proxy_post("/v1/profiles/enabled", body)
-    if err:
-        return jsonify({"error": err}), 502
-    return jsonify(data)
-
-
 @app.route("/api/usage")
 def api_usage():
     force = request.args.get("force", "false")
     data, err = _proxy("/v1/profiles/usage", f"?force={force}")
     if err:
         return jsonify({"error": err, "profiles_usage": []}), 502
+    return jsonify(data)
+
+
+@app.route("/api/token_usage")
+def api_token_usage():
+    data, err = _proxy("/v1/token_usage")
+    if err:
+        return jsonify({"error": err, "ok": False}), 502
     return jsonify(data)
 
 
@@ -1073,13 +1333,8 @@ def not_found(e):
     return jsonify({"error": "Not found"}), 404
 
 
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
-
 if __name__ == "__main__":
-    port  = int(os.getenv("PORT", "80"))
+    port = int(os.getenv("PORT", "80"))
     debug = os.getenv("DEBUG", "false").lower() == "true"
     print(f"Starting AGY Dashboard on 0.0.0.0:{port}")
-    print(f"Proxying to API at {API_BASE}")
     app.run(host="0.0.0.0", port=port, debug=debug)

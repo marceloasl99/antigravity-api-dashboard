@@ -1,5 +1,5 @@
 [Unit]
-Description=AGY Dashboard — porta 80 (uso das contas Google)
+Description=AGY Dashboard & Control Panel — Port 80
 After=network.target agy-api.service
 Wants=agy-api.service
 
