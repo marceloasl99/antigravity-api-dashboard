@@ -80,6 +80,41 @@ Three things make that possible, all automatic:
 2. **`--agent gateway`**: the gateway writes a custom agent (`<home>/.gemini/config/agents/gateway.md`) whose system prompt declares the CLI's built-in tools disabled and teaches the `<tool_call>` protocol. With the default coding agent the model used its own web search / file tools instead of the client's tools (1 of 4 prompts); with the gateway agent it complied 3/3 on Gemini Flash and Claude Sonnet.
 3. **Effort in the model id, never `--effort`**: on 1.4.10 `--effort` conflicts with `gemini-3.8-flash-high` and is rejected by Claude/GPT-OSS models.
 
+### Where the 37 s went
+
+All models (Gemini, Claude, GPT-OSS) showed the same 33.0 s ±0.03 s pause between sending the message and the first model call when the CLI ran in the user's regular HOME — too precise to be model latency. It is a fixed per-turn stall of the CLI with that configuration (MCP servers, plugins, hooks loaded per turn). The remaining ~3 s was the process cold start (OAuth + `loadCodeAssist`), now paid in the background by the warm pool. What is left (~2 s) is the model itself.
+
+### Bugs fixed in v3.0
+
+| # | Problem in v2.0 | v3.0 |
+| :-- | :--- | :--- |
+| 1 | `tools` ignored, `tool_calls` never returned — tool-using clients could not work | OpenAI and Anthropic tool calling, streaming included |
+| 2 | Upstream failures returned as HTTP 200 with `"Unable to process response…"` as the answer | HTTP 502 in OpenAI / Anthropic error format |
+| 3 | `--effort` passed together with suffixed ids (`gemini-3.8-flash-high`) and non-Gemini models → `invalid model selection` on agy 1.4.10 | effort carried in the model id, `--effort` never used |
+| 4 | `/v1/models` listed only Gemini; unknown names silently fell back to the default | all `agy models` ids exposed, client names mapped by alias |
+| 5 | Every request body written to `/tmp/agy_incoming.log` without rotation | logging only with `DEBUG=true` |
+| 6 | One active account only; others served as fallback | 1–3 enabled accounts, round robin when ≥2, fallback kept |
+| 7 | Default coding agent used its own web search / file tools instead of the client's tools | custom `gateway` agent (3/3 compliance in tests) |
+| 8 | `fcntl` import made the project Linux-only | optional, thread lock fallback |
+| 9 | Quota monitor "Activate" button broken after refactor; stale warm processes could re-enter the pool after shutdown; legacy `agy_config.json` (only `active_profile`) ignored | all fixed, covered by tests |
+
+Known limitation: tool calling is a prompt protocol, not a native API, so compliance is probabilistic (measured 3/3 single-turn and 2/2 multi-turn on Gemini Flash Low and Claude Sonnet 4.6). `/usage` is not answered in print mode on agy 1.4.10, so quota cards stay empty.
+
+### Token cost: gateway vs. calling a model API directly
+
+Every request through the gateway carries the CLI's own agent context on top of your conversation. Measured `prompt_tokens` for a one-line prompt ("Reply with exactly the word: apple"):
+
+| Path | Input tokens for that request |
+| :--- | :--- |
+| Direct model API (e.g. Gemini API / AI Studio) | ~10 (just the prompt) |
+| v2.0 gateway, user's interactive HOME | **~24,000** |
+| Clean HOME, default agent | ~6,800 |
+| **v3.0 gateway (clean HOME + `gateway` agent)** | **~2,000** |
+
+So the fixed overhead is now ≈ **2k input tokens per request** (plus ~400 when a `tools` list is attached; output tokens are identical). Conversation history is re-sent each turn exactly as with any stateless API, so that part is the same in both cases. Estimate for 100 requests with 1k-token prompts: direct ≈ 100k input tokens, gateway ≈ 300k. The CLI reports `cache_read_tokens` on repeated context, which reduces the real cost of the fixed part.
+
+What that means in money depends on what you pay for: the Antigravity quota is a subscription allowance (the overhead eats quota, not dollars), while a direct API bills per token at the provider's current rates — multiply the token estimates above by the price list of the day. For Claude Code specifically, its own system prompt (~100k tokens per turn) dwarfs the gateway overhead either way.
+
 ### Using it from Claude Code (Anthropic Messages API)
 
 The gateway also serves `POST /v1/messages` (+ `/v1/messages/count_tokens`) in Anthropic format, so Claude Code can run on your Antigravity quota:
