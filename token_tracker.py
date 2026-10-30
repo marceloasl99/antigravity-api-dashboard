@@ -1,16 +1,33 @@
 """
 Token usage tracking module for Antigravity API.
-Maintains persistent, accumulative token usage by hour, day, and month in /root/agy_token_usage.json.
-Safe across multi-process Gunicorn workers using file locking (fcntl).
+Maintains persistent, accumulative token usage by hour, day, and month in $TOKEN_USAGE_FILE
+(default ~/agy_token_usage.json). Safe across multi-process Gunicorn workers using file
+locking (fcntl) on POSIX; falls back to a thread lock where fcntl is unavailable.
 """
 
-import fcntl
 import json
 import os
+import threading
 from datetime import datetime, timezone
 
-TOKEN_USAGE_FILE = os.getenv("TOKEN_USAGE_FILE", "/root/agy_token_usage.json")
-LOCK_FILE = os.getenv("TOKEN_LOCK_FILE", "/root/agy_token_usage.json.lock")
+try:
+    import fcntl  # POSIX: cross-process lock between Gunicorn workers
+except ImportError:  # Windows (tests/dev): fall back to an in-process lock
+    fcntl = None
+
+TOKEN_USAGE_FILE = os.getenv("TOKEN_USAGE_FILE", os.path.expanduser("~/agy_token_usage.json"))
+LOCK_FILE = os.getenv("TOKEN_LOCK_FILE", TOKEN_USAGE_FILE + ".lock")
+_thread_lock = threading.Lock()
+
+
+def _lock(lf):
+    if fcntl:
+        fcntl.flock(lf, fcntl.LOCK_EX)
+
+
+def _unlock(lf):
+    if fcntl:
+        fcntl.flock(lf, fcntl.LOCK_UN)
 
 
 def _empty_bucket():
@@ -52,8 +69,8 @@ def record_tokens(profile_id: str, model: str, prompt_tokens: int, completion_to
     ts_iso = now.isoformat()
 
     try:
-        with open(LOCK_FILE, "w") as lf:
-            fcntl.flock(lf, fcntl.LOCK_EX)
+        with _thread_lock, open(LOCK_FILE, "w") as lf:
+            _lock(lf)
             try:
                 data = None
                 if os.path.exists(TOKEN_USAGE_FILE):
@@ -140,7 +157,7 @@ def record_tokens(profile_id: str, model: str, prompt_tokens: int, completion_to
                     json.dump(data, f, indent=2)
                 os.replace(tmp_path, TOKEN_USAGE_FILE)
             finally:
-                fcntl.flock(lf, fcntl.LOCK_UN)
+                _unlock(lf)
     except Exception as e:
         print(f"[token_tracker] Error recording tokens: {e}")
 

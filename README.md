@@ -1,10 +1,10 @@
 <div align="center">
 
-# ⚡ Antigravity API & Dashboard (v2.0)
-### *High-Throughput OpenAI-Compatible Gateway for Gemini 3.8 Flash with Real-Time Token Tracking & Google Quota Monitoring*
+# ⚡ Antigravity API & Dashboard (v3.0)
+### *OpenAI-Compatible Gateway for Gemini 3.8 Flash — Warm Process Pool, Tool Calling, Multi-Account Round Robin & Quota Monitoring*
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg?style=for-the-badge)](LICENSE)
-[![Version: 2.0](https://img.shields.io/badge/Version-2.0.0-success.svg?style=for-the-badge)](https://github.com/marceloasl99/antigravity-api-dashboard/releases)
+[![Version: 3.0](https://img.shields.io/badge/Version-3.0.0-success.svg?style=for-the-badge)](https://github.com/marceloasl99/antigravity-api-dashboard/releases)
 [![Python: 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB.svg?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
 [![OpenAI Compatible](https://img.shields.io/badge/API-OpenAI%20v1%20Compatible-412991.svg?style=for-the-badge&logo=openai&logoColor=white)](https://platform.openai.com/docs/api-reference)
 [![Flask](https://img.shields.io/badge/Backend-Flask%20%26%20Gunicorn-000000.svg?style=for-the-badge&logo=flask&logoColor=white)](https://palletsprojects.com/p/flask/)
@@ -12,7 +12,7 @@
 
 <p align="center">
   <a href="#-overview">Overview</a> •
-  <a href="#-whats-new-in-v20">What's New in v2.0</a> •
+  <a href="#-whats-new-in-v30">What's New in v3.0</a> •
   <a href="#-dashboard-preview">Dashboard Preview</a> •
   <a href="#-architecture">Architecture</a> •
   <a href="#-quickstart">Quickstart</a> •
@@ -37,9 +37,83 @@ Designed for self-hosters and power users integrating Gemini into tools like **L
 
 ---
 
-## 🚀 What's New in v2.0
+## 🚀 What's New in v3.0
 
-Version 2.0 represents a major architectural upgrade over Version 1.0:
+| Area | v2.0 | v3.0 |
+| :--- | :--- | :--- |
+| **Latency** | One cold `agy` process per request (~4–5 s of OAuth + `loadCodeAssist` before the first token) | **Warm pool** (`agy_runner.py`): processes are pre-started in `--input-format stream-json` mode and parked after their `init` event. A request takes a warm process, sends one turn and discards it. The cold start is paid in the background, not on the request path. |
+| **Tool calling** | `tools` ignored, `tool_calls` never returned | **OpenAI function calling** (`tool_calling.py`): `tools`, `tool_choice`, `tool_calls` with `finish_reason: "tool_calls"`, streaming tool-call deltas, `role: "tool"` results round-tripped. Implemented as a prompt protocol (`<tool_call>` blocks) because the CLI has no way to receive tool results. |
+| **Accounts** | Exactly one active account | **Enable 1, 2 or 3 accounts.** One enabled = direct routing. Two or more = round robin, with automatic fallback to the next enabled account when one fails. Disabled accounts are never used. |
+| **Effort** | `low` / `medium` / `high` | `low` / `medium` / `high` / **`auto`**. A model suffix sent by the client (`gemini-3.8-flash-high`) always wins; `auto` without a suffix means `low`. |
+| **Errors** | Failures returned as HTTP 200 with error text as the answer | Real **HTTP 502** in OpenAI error format (`{"error": {...}}`); in streams, an `error` event before `[DONE]`. |
+| **Privacy** | Every request body logged to `/tmp/agy_incoming.log` | Request/call logs only when `DEBUG=true`. |
+| **Engine** | Always `--dangerously-skip-permissions` | Dashboard toggle **"agy internal tools"**: whether the CLI may run its own tools (shell, files) on the server. Independent of client-side OpenAI tools. |
+| **Claude Code** | — | Anthropic `/v1/messages` endpoint (streaming, tools, tool_result round trips) so `ANTHROPIC_BASE_URL` can point at the gateway. |
+| **Models** | Gemini 3.8 Flash only | All ids from `agy models`: Gemini 3.8 Flash low/medium/high, Claude Sonnet 4.6, Claude Opus 4.6 (thinking), GPT-OSS 120B, plus aliases for client-side names. |
+| **Tests** | None | `pytest` suite (58 tests) with a fake `agy` that speaks the documented stream-json protocol. Runs on Linux, macOS and Windows. |
+
+```bash
+pip install -r requirements-dev.txt && python -m pytest
+```
+
+### How the warm pool works
+
+```
+startup / config change ──► spawn agy (account, effort) ──► wait for {"event":"init"} ──► parked
+request ──► take parked process ──► stdin {"event":"user",...} ──► stream step_update ──► result ──► close process
+                                                                └── background refill of the pool slot
+```
+
+Pool keys are `(account, effort, internal_tools)` because `--model`/`--effort` are start-time flags. Tunables: `AGY_POOL_SIZE` (warm processes per key, default 1), `AGY_POOL_MAX_IDLE` (seconds before an idle process is recycled, default 600), `AGY_POOL_ENABLED=false` to disable. `/v1/health` and the dashboard show hits/misses.
+
+### Measured on the real CLI (agy 1.4.10, Windows, 2026-10-30)
+
+| Scenario | First token |
+| :--- | :--- |
+| v2.0 path: cold process, user's interactive HOME (8 MCP servers, 7 plugins, hooks) | **~37 s** (33 s of it is a fixed per-turn stall caused by that config, plus ~24k tokens of system prompt) |
+| Clean dedicated HOME, cold process | ~5 s |
+| Clean HOME + warm pool (v3) | **~1.8–2.5 s** (Gemini Flash), ~4 s (Claude Opus thinking), ~2k tokens of system prompt |
+
+Three things make that possible, all automatic:
+
+1. **Dedicated clean HOME per account** (`home` in `profiles.json`). Never point it at a HOME that carries your interactive agy config. On Windows the OAuth token lives in the Credential Manager, so a fresh HOME needs no new login; on Linux copy `~/.gemini/antigravity-cli/antigravity-oauth-token` or run `HOME=<dir> agy auth login` once.
+2. **`--agent gateway`**: the gateway writes a custom agent (`<home>/.gemini/config/agents/gateway.md`) whose system prompt declares the CLI's built-in tools disabled and teaches the `<tool_call>` protocol. With the default coding agent the model used its own web search / file tools instead of the client's tools (1 of 4 prompts); with the gateway agent it complied 3/3 on Gemini Flash and Claude Sonnet.
+3. **Effort in the model id, never `--effort`**: on 1.4.10 `--effort` conflicts with `gemini-3.8-flash-high` and is rejected by Claude/GPT-OSS models.
+
+### Using it from Claude Code (Anthropic Messages API)
+
+The gateway also serves `POST /v1/messages` (+ `/v1/messages/count_tokens`) in Anthropic format, so Claude Code can run on your Antigravity quota:
+
+```bash
+export ANTHROPIC_BASE_URL=http://<server-ip>:8080
+export ANTHROPIC_API_KEY=anything                       # ignored, but Claude Code requires it
+export ANTHROPIC_SMALL_FAST_MODEL=claude-3-5-haiku-20241022   # -> gemini-3.8-flash-low (fast background calls)
+claude --model claude-sonnet-4-6
+```
+
+Model aliases: `claude-opus*` → `claude-opus-4-6-thinking`, `claude-sonnet*` → `claude-sonnet-4-6`, `claude-*haiku*` → `gemini-3.8-flash-low`, `gpt-oss*` → `gpt-oss-120b-medium`, anything else → Gemini 3.8 Flash with the dashboard effort. `GET /v1/models` lists the real CLI ids. Verified with `claude -p` on a sample project: 3 turns (two `Read` tool calls + answer) in 16 s. OpenAI-style clients (DeepSeek harness, LibreChat, Cursor…) use `/v1/chat/completions` as before.
+
+Known limit: `/usage` (Google quota) is not answered by the CLI in print mode on 1.4.10, so the dashboard's quota cards show "no data" there.
+
+### Tool calling example
+
+```python
+resp = client.chat.completions.create(
+    model="gemini-3.8-flash-medium",
+    messages=[{"role": "user", "content": "What's the weather in Lisbon?"}],
+    tools=[{"type": "function", "function": {
+        "name": "get_weather",
+        "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}}}],
+)
+call = resp.choices[0].message.tool_calls[0]        # finish_reason == "tool_calls"
+# ... run the tool, then send {"role": "tool", "tool_call_id": call.id, "content": "22C sunny"} back as usual
+```
+
+---
+
+## 📜 v2.0 (previous)
+
+Version 2.0 represented a major architectural upgrade over Version 1.0:
 
 | Feature | Version 1.0 (Legacy) | Version 2.0 (Current) |
 | :--- | :--- | :--- |
@@ -56,11 +130,15 @@ Version 2.0 represents a major architectural upgrade over Version 1.0:
 
 ## 📸 Dashboard Preview
 
-### 🎛️ Version 2.0 Control Panel & Token Usage
-![AGY Control Panel Overview](dashboard_v2_overview.png)
+### 🎛️ v3.0: enabled accounts (round robin), effort incl. Auto, engine & warm pool, token usage, quota monitor
+![AGY v3 Dashboard](dashboard_v3_full.png)
 
-### 📊 Complete View: API Configuration, Accumulated Tokens & Quota Telemetry
-![AGY Dashboard Full View](dashboard_v2_full.png)
+<details><summary>Previous version (v2.0)</summary>
+
+![AGY Control Panel Overview v2](dashboard_v2_overview.png)
+![AGY Dashboard Full View v2](dashboard_v2_full.png)
+
+</details>
 
 ---
 
@@ -242,8 +320,8 @@ Base URL: `http://<server-ip>:8080/v1`
 | `POST` | `/v1/responses` | OpenAI compatibility alias |
 | `POST` | `/v1/completions` | Legacy completions endpoint |
 | `GET` | `/v1/models` | List available Gemini 3.8 Flash model configurations |
-| `GET` | `/v1/config` | Retrieve current active profile and reasoning effort |
-| `POST` | `/v1/config` | Dynamically update active profile or reasoning effort |
+| `GET` | `/v1/config` | Enabled accounts, routing mode, effort, engine options, pool stats |
+| `POST` | `/v1/config` | `{"enabled_profiles": ["p1","p2"]}`, `{"active_effort": "auto"}`, `{"agy_internal_tools": false}` (legacy `{"active_profile": "p2"}` still works and means "only p2") |
 | `GET` | `/v1/tokens/usage` | Retrieve accumulated token usage summary |
 | `GET` | `/v1/profiles` | List configured accounts and real-time statistics |
 | `GET` | `/v1/profiles/usage` | Fetch real-time Google account quota consumption |
@@ -254,16 +332,19 @@ Base URL: `http://<server-ip>:8080/v1`
 Switch the active account or reasoning effort programmatically:
 
 ```bash
-# Switch to Profile 2
+# Round robin across Profile 1 and Profile 2
 curl -X POST http://<server-ip>:8080/v1/config \
   -H "Content-Type: application/json" \
-  -d '{"active_profile": "p2"}'
+  -d '{"enabled_profiles": ["p1", "p2"]}'
 
-# Switch reasoning effort to High
-curl -X POST http://<server-ip>:8080/v1/config \
-  -H "Content-Type: application/json" \
-  -d '{"active_effort": "high"}'
+# Only Profile 2 (direct routing)
+curl -X POST http://<server-ip>:8080/v1/config -H "Content-Type: application/json" -d '{"active_profile": "p2"}'
+
+# Reasoning effort: low | medium | high | auto
+curl -X POST http://<server-ip>:8080/v1/config -H "Content-Type: application/json" -d '{"active_effort": "auto"}'
 ```
+
+Every completion response carries `X-Profile-Used` and `X-Effort-Used` headers.
 
 ---
 
@@ -322,7 +403,15 @@ endpoints:
 
 ## 📜 Version History
 
-### Version 2.0.0 (Current)
+### Version 3.0.0 (Current)
+- Warm process pool (`agy_runner.py`) — requests skip the CLI cold start.
+- OpenAI tool calling (`tool_calling.py`), streaming included.
+- 1–3 enabled accounts: direct routing or round robin with fallback.
+- Effort `auto` (follows the client's model suffix).
+- Upstream failures are HTTP 502 in OpenAI error format; debug logs opt-in.
+- `agy internal tools` toggle; pytest suite with a simulated CLI.
+
+### Version 2.0.0
 - **Gemini 3.8 Flash Exclusive**: Fine-tuned execution parameters with selectable effort (`low`, `medium`, `high`).
 - **Direct Account Routing**: Active account selector replacing unpredictable round-robin routing.
 - **Persistent Token Tracker**: New `token_tracker.py` with multi-worker atomic locking (`fcntl`), hourly/daily/monthly/profile tables.

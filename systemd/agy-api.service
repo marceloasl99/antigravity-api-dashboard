@@ -30,6 +30,9 @@ StartLimitBurst=5
 Environment=PORT=8080
 Environment=AGY_BINARY=/root/.local/bin/agy
 Environment=HOME=/root
+# Warm pool: each Gunicorn worker keeps AGY_POOL_SIZE ready agy processes per (account, effort)
+Environment=AGY_POOL_SIZE=2
+Environment=AGY_POOL_MAX_IDLE=600
 Environment=PATH=/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 TimeoutStopSec=30

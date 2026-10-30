@@ -1,169 +1,121 @@
 """
-OpenAI-compatible REST API wrapper — Gemini 3.8 Flash Exclusive Edition (Refined).
+OpenAI-compatible REST API wrapper for the Antigravity CLI (agy) — v3.
 
-Guarantees 100% OpenAI compatibility:
-  - Supports streaming and non-streaming responses.
-  - Guarantees non-empty content in every chunk and completed message (prevents EMPTY_RESPONSE).
-  - Handles reasoning models, developer/system roles, and complex content parts.
-  - Echoes requested model name in response.
-  - Selected profile is called directly (no round-robin; deterministic execution).
-  - Web-configurable Active Profile & Reasoning Effort.
-  - Endpoints:
-      * POST /v1/chat/completions
-      * POST /v1/responses (compatibility alias)
-      * POST /v1/completions
-      * GET  /v1/models & /v1/models/{model}
-      * GET  /v1/health
-      * GET/POST /v1/config
-      * GET  /v1/profiles & /v1/profiles/usage
+  * Gemini 3.8 Flash with reasoning effort low / medium / high / auto.
+  * 1..N enabled Google accounts; direct routing with one account, round robin
+    with two or more, automatic fallback to the next enabled account on error.
+  * Warm pool of pre-started agy processes (agy_runner.py) so requests skip
+    the CLI cold start (OAuth + loadCodeAssist).
+  * OpenAI tool calling (tools / tool_choice / tool_calls) via a prompt
+    protocol (tool_calling.py), streaming included.
+  * Upstream failures are real HTTP errors (502) in OpenAI error format.
+
+Endpoints:
+  POST /v1/chat/completions   (alias: /v1/responses)
+  POST /v1/completions
+  GET  /v1/models, /v1/models/{id}
+  GET/POST /v1/config
+  GET  /v1/profiles, /v1/profiles/usage, /v1/profiles/{id}/usage, /v1/profiles/{id}/health
+  GET  /v1/tokens/usage (alias /v1/token_usage)
+  GET  /v1/health
 """
 
 import json
 import os
+import random
 import subprocess
 import threading
 import time
 import uuid
 from datetime import datetime, timezone
+
 from flask import Flask, Response, jsonify, request, stream_with_context
 from flask_cors import CORS
-from token_tracker import record_tokens, get_token_usage_summary
 
-# ---------------------------------------------------------------------------
-# App setup
-# ---------------------------------------------------------------------------
+import agy_runner
+from agy_runner import AgyError, WarmPool
+from tool_calling import ToolCallParser, build_prompt, extract_text
+from token_tracker import get_token_usage_summary, record_tokens
 
 app = Flask(__name__)
 CORS(app)
 
-AGY_BINARY = os.getenv("AGY_BINARY", "/root/.local/bin/agy")
-CONFIG_FILE = os.getenv("CONFIG_FILE", "/root/agy_config.json")
+AGY_BINARY = agy_runner.AGY_BINARY
+CONFIG_FILE = os.getenv("CONFIG_FILE", os.path.expanduser("~/agy_config.json"))
+DEBUG_LOG = os.getenv("DEBUG", "false").lower() == "true"
+DEBUG_LOG_DIR = os.getenv("DEBUG_LOG_DIR", agy_runner.AGY_CWD)
+
+EFFORTS = ("low", "medium", "high")
+EFFORT_OPTIONS = EFFORTS + ("auto",)
+DEFAULT_EFFORT = "low"
+BASE_MODEL = "gemini-3.8-flash"
+
+# Model ids as `agy models` lists them (agy 1.4.10). Effort for Gemini is part
+# of the id; the other models take no effort flag at all.
+GEMINI_MODELS = tuple(f"{BASE_MODEL}-{e}" for e in EFFORTS)
+OTHER_MODELS = ("claude-sonnet-4-6", "claude-opus-4-6-thinking", "gpt-oss-120b-medium")
+CLI_MODELS = GEMINI_MODELS + OTHER_MODELS
+# Prefix aliases so clients that send their own names (Claude Code, harnesses) land on a CLI model.
+MODEL_ALIASES = (
+    ("claude-opus", "claude-opus-4-6-thinking"),
+    ("claude-sonnet", "claude-sonnet-4-6"),
+    ("claude-haiku", f"{BASE_MODEL}-low"),      # Claude Code uses Haiku for quick background calls: keep it fast
+    ("claude-3-5-haiku", f"{BASE_MODEL}-low"),
+    ("claude", "claude-sonnet-4-6"),
+    ("gpt-oss", "gpt-oss-120b-medium"),
+)
 
 # ---------------------------------------------------------------------------
-# Profiles Configuration
+# Profiles
 # ---------------------------------------------------------------------------
 
-def _load_profiles():
-    # Attempt to load custom profiles from file if present
+def _make_profile(pid, name, email, home, concurrency=4) -> dict:
+    return {
+        "id": pid,
+        "name": name,
+        "email": email,
+        "home": os.path.expanduser(home),
+        "semaphore": threading.Semaphore(int(concurrency)),
+        "stats": {"requests": 0, "tokens_in": 0, "tokens_out": 0, "errors": 0, "last_used": None},
+        "lock": threading.Lock(),
+    }
+
+
+def _load_profiles() -> list:
     candidates = [
         os.getenv("PROFILES_CONFIG", ""),
-        "/root/profiles.json",
+        os.path.expanduser("~/profiles.json"),
         "profiles.json",
     ]
     for p_path in candidates:
         if p_path and os.path.isfile(p_path):
             try:
                 with open(p_path, "r", encoding="utf-8") as f:
-                    raw_profiles = json.load(f)
-                loaded = []
-                for p in raw_profiles:
-                    loaded.append({
-                        "id": p["id"],
-                        "name": p.get("name", f"Profile {p['id'].upper()}"),
-                        "email": p.get("email", ""),
-                        "home": os.path.expanduser(p.get("home", "~")),
-                        "semaphore": threading.Semaphore(int(p.get("concurrency", 4))),
-                        "stats": {
-                            "requests": 0,
-                            "tokens_in": 0,
-                            "tokens_out": 0,
-                            "errors": 0,
-                            "last_used": None,
-                        },
-                        "lock": threading.Lock(),
-                    })
+                    raw = json.load(f)
+                loaded = [
+                    _make_profile(p["id"], p.get("name", f"Profile {p['id'].upper()}"),
+                                  p.get("email", ""), p.get("home", "~"), p.get("concurrency", 4))
+                    for p in raw
+                ]
                 if loaded:
                     return loaded
             except Exception as e:
                 print(f"[WARN] Failed to load profiles from {p_path}: {e}")
 
-    # Default profile definitions (customizable via env vars)
+    home = os.path.expanduser("~")
     return [
-        {
-            "id": "p1",
-            "name": os.getenv("P1_NAME", "Profile 1"),
-            "email": os.getenv("P1_EMAIL", "profile1@example.com"),
-            "home": os.getenv("P1_HOME", "/root"),
-            "semaphore": threading.Semaphore(4),
-            "stats": {
-                "requests": 0,
-                "tokens_in": 0,
-                "tokens_out": 0,
-                "errors": 0,
-                "last_used": None,
-            },
-            "lock": threading.Lock(),
-        },
-        {
-            "id": "p2",
-            "name": os.getenv("P2_NAME", "Profile 2"),
-            "email": os.getenv("P2_EMAIL", "profile2@example.com"),
-            "home": os.getenv("P2_HOME", "/root/.agy-perfil2"),
-            "semaphore": threading.Semaphore(4),
-            "stats": {
-                "requests": 0,
-                "tokens_in": 0,
-                "tokens_out": 0,
-                "errors": 0,
-                "last_used": None,
-            },
-            "lock": threading.Lock(),
-        },
-        {
-            "id": "p3",
-            "name": os.getenv("P3_NAME", "Profile 3"),
-            "email": os.getenv("P3_EMAIL", "profile3@example.com"),
-            "home": os.getenv("P3_HOME", "/root/.agy-perfil3"),
-            "semaphore": threading.Semaphore(4),
-            "stats": {
-                "requests": 0,
-                "tokens_in": 0,
-                "tokens_out": 0,
-                "errors": 0,
-                "last_used": None,
-            },
-            "lock": threading.Lock(),
-        },
+        _make_profile("p1", os.getenv("P1_NAME", "Profile 1"), os.getenv("P1_EMAIL", "profile1@example.com"),
+                      os.getenv("P1_HOME", home)),
+        _make_profile("p2", os.getenv("P2_NAME", "Profile 2"), os.getenv("P2_EMAIL", "profile2@example.com"),
+                      os.getenv("P2_HOME", os.path.join(home, ".agy-perfil2"))),
+        _make_profile("p3", os.getenv("P3_NAME", "Profile 3"), os.getenv("P3_EMAIL", "profile3@example.com"),
+                      os.getenv("P3_HOME", os.path.join(home, ".agy-perfil3"))),
     ]
 
 
 PROFILES = _load_profiles()
 PROFILE_INDEX = {p["id"]: p for p in PROFILES}
-_config_lock = threading.Lock()
-
-
-def get_config() -> dict:
-    """Read the active configuration (profile + effort/model)."""
-    try:
-        with open(CONFIG_FILE, "r") as f:
-            return json.load(f)
-    except Exception:
-        return {
-            "active_profile": "p1",
-            "active_effort": "low",
-            "active_model": "gemini-3.8-flash-low",
-        }
-
-
-def save_config(cfg: dict):
-    """Save configuration atomically."""
-    with _config_lock:
-        tmp = CONFIG_FILE + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(cfg, f, indent=2)
-        os.replace(tmp, CONFIG_FILE)
-
-
-def get_target_profiles() -> list:
-    """
-    Returns candidate profiles starting with the user's SELECTED profile.
-    No round-robin: calls the chosen profile directly!
-    """
-    cfg = get_config()
-    pid = cfg.get("active_profile", "p1")
-    primary = PROFILE_INDEX.get(pid, PROFILES[0])
-    backups = [p for p in PROFILES if p["id"] != primary["id"]]
-    return [primary] + backups
+POOL = WarmPool()
 
 
 def _record_stats(profile, tokens_in: int, tokens_out: int, error: bool = False):
@@ -177,365 +129,262 @@ def _record_stats(profile, tokens_in: int, tokens_out: int, error: bool = False)
 
 
 # ---------------------------------------------------------------------------
-# Models Catalog: Gemini 3.8 Flash Exclusive
+# Config (file-backed, cached by mtime so each request doesn't hit disk)
 # ---------------------------------------------------------------------------
 
-AVAILABLE_MODELS = [
-    {
-        "id": "gemini-3.8-flash-low",
-        "object": "model",
-        "created": 1728864000,
-        "owned_by": "google",
-        "permission": [],
-        "root": "gemini-3.8-flash-low",
-        "parent": None,
-    },
-    {
-        "id": "gemini-3.8-flash-medium",
-        "object": "model",
-        "created": 1728864000,
-        "owned_by": "google",
-        "permission": [],
-        "root": "gemini-3.8-flash-medium",
-        "parent": None,
-    },
-    {
-        "id": "gemini-3.8-flash-high",
-        "object": "model",
-        "created": 1728864000,
-        "owned_by": "google",
-        "permission": [],
-        "root": "gemini-3.8-flash-high",
-        "parent": None,
-    },
-    {
-        "id": "gemini-3.8-flash",
-        "object": "model",
-        "created": 1728864000,
-        "owned_by": "google",
-        "permission": [],
-        "root": "gemini-3.8-flash",
-        "parent": None,
-    },
-]
+_config_lock = threading.Lock()
+_config_cache = {"mtime": None, "data": None}
 
+
+def _default_config() -> dict:
+    return {
+        "enabled_profiles": [PROFILES[0]["id"]],
+        "active_profile": PROFILES[0]["id"],
+        "active_effort": DEFAULT_EFFORT,
+        "active_model": f"{BASE_MODEL}-{DEFAULT_EFFORT}",
+        "agy_internal_tools": True,
+    }
+
+
+def _normalize_config(cfg: dict) -> dict:
+    base = _default_config()
+    if not isinstance(cfg, dict):
+        return base
+    out = {**base, **cfg}
+
+    enabled = cfg.get("enabled_profiles")
+    if not isinstance(enabled, list):  # legacy config: only active_profile present
+        enabled = [out.get("active_profile")]
+    enabled = [pid for pid in enabled if pid in PROFILE_INDEX]
+    # keep declared order of PROFILES for determinism
+    enabled = [p["id"] for p in PROFILES if p["id"] in enabled]
+    if not enabled:
+        enabled = [PROFILES[0]["id"]]
+    out["enabled_profiles"] = enabled
+    if out.get("active_profile") not in enabled:
+        out["active_profile"] = enabled[0]
+
+    eff = str(out.get("active_effort", DEFAULT_EFFORT)).lower()
+    out["active_effort"] = eff if eff in EFFORT_OPTIONS else DEFAULT_EFFORT
+    out["active_model"] = BASE_MODEL if out["active_effort"] == "auto" else f"{BASE_MODEL}-{out['active_effort']}"
+    out["agy_internal_tools"] = bool(out.get("agy_internal_tools", True))
+    return out
+
+
+def get_config() -> dict:
+    try:
+        mtime = os.path.getmtime(CONFIG_FILE)
+    except OSError:
+        return _default_config()
+    with _config_lock:
+        if _config_cache["mtime"] == mtime and _config_cache["data"] is not None:
+            return dict(_config_cache["data"])
+        try:
+            with open(CONFIG_FILE, "r") as f:
+                data = _normalize_config(json.load(f))
+        except Exception:
+            data = _default_config()
+        _config_cache.update(mtime=mtime, data=data)
+        return dict(data)
+
+
+def save_config(cfg: dict) -> dict:
+    cfg = _normalize_config(cfg)
+    with _config_lock:
+        tmp = CONFIG_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(cfg, f, indent=2)
+        os.replace(tmp, CONFIG_FILE)
+        _config_cache.update(mtime=os.path.getmtime(CONFIG_FILE), data=cfg)
+    return cfg
+
+
+# ---------------------------------------------------------------------------
+# Routing: direct (1 account) or round robin (2+), with fallback
+# ---------------------------------------------------------------------------
+
+_rr_lock = threading.Lock()
+_rr_counter = random.randrange(1000)  # random start so Gunicorn workers don't all begin on the same account
+
+
+def get_target_profiles(cfg: dict = None) -> list:
+    """Ordered list: the account to try first, then the other enabled ones as fallback."""
+    global _rr_counter
+    cfg = cfg or get_config()
+    enabled = [PROFILE_INDEX[pid] for pid in cfg["enabled_profiles"]]
+    if len(enabled) <= 1:
+        return enabled
+    with _rr_lock:
+        idx = _rr_counter % len(enabled)
+        _rr_counter += 1
+    return enabled[idx:] + enabled[:idx]
+
+
+def routing_mode(cfg: dict = None) -> str:
+    cfg = cfg or get_config()
+    return "round_robin" if len(cfg["enabled_profiles"]) > 1 else "direct"
+
+
+# ---------------------------------------------------------------------------
+# Models / effort
+# ---------------------------------------------------------------------------
+
+def _model_entry(mid: str) -> dict:
+    owner = "google" if mid.startswith("gemini") else "anthropic" if mid.startswith("claude") else "antigravity"
+    return {"id": mid, "object": "model", "created": 1728864000, "owned_by": owner, "permission": [], "root": mid, "parent": None}
+
+
+AVAILABLE_MODELS = [_model_entry(m) for m in GEMINI_MODELS + (BASE_MODEL,) + OTHER_MODELS]
 MODEL_INDEX = {m["id"]: m for m in AVAILABLE_MODELS}
 
 
-def resolve_model(requested_model: str) -> str:
-    """
-    Resolve requested model strictly to Gemini 3.8 Flash (Low, Medium, or High).
-    """
-    cfg = get_config()
-    default_model = cfg.get("active_model", "gemini-3.8-flash-low")
-
+def effort_from_model(requested_model) -> str:
+    """Effort encoded in the requested model name, or '' if none."""
     if not requested_model:
-        return default_model
+        return ""
+    m = str(requested_model).strip().lower()
+    for eff in EFFORTS:
+        if m == eff or m.endswith(f"-{eff}") or m.endswith(f"/{eff}"):
+            return eff
+    if m.endswith("-med") or m == "med":
+        return "medium"
+    return ""
 
-    clean = requested_model.strip().lower()
-    if clean in ("gemini-3.8-flash-high", "high"):
-        return "gemini-3.8-flash-high"
-    elif clean in ("gemini-3.8-flash-medium", "medium", "med"):
-        return "gemini-3.8-flash-medium"
-    elif clean in ("gemini-3.8-flash-low", "low"):
-        return "gemini-3.8-flash-low"
-    else:
-        return default_model
+
+def resolve_effort(requested_model, cfg: dict) -> str:
+    """Model suffix wins; otherwise the dashboard setting; 'auto' without a suffix means low."""
+    eff = effort_from_model(requested_model)
+    if eff:
+        return eff
+    active = cfg.get("active_effort", DEFAULT_EFFORT)
+    return active if active in EFFORTS else DEFAULT_EFFORT
+
+
+def resolve_model(requested_model, cfg: dict = None) -> str:
+    """
+    Map whatever the client asked for onto a CLI model id.
+      * exact CLI id (any family)         -> itself
+      * gemini-3.8-flash[-effort] / bare   -> effort from suffix, else dashboard effort
+      * claude-* / gpt-oss-* aliases       -> nearest CLI model
+      * anything else                     -> Gemini with the dashboard effort
+    """
+    cfg = cfg or get_config()
+    m = str(requested_model or "").strip().lower()
+    if m in CLI_MODELS:
+        return m
+    if not m.startswith("gemini"):
+        for prefix, target in MODEL_ALIASES:
+            if m.startswith(prefix):
+                return target
+    return f"{BASE_MODEL}-{resolve_effort(requested_model, cfg)}"
 
 
 # ---------------------------------------------------------------------------
-# Subprocess Execution (High Performance)
+# Execution
 # ---------------------------------------------------------------------------
 
-def _build_env(profile) -> dict:
-    env = os.environ.copy()
-    env["HOME"] = profile["home"]
-    env["PATH"] = f"/root/.local/bin:{env.get('PATH', '')}"
-    return env
+def _estimate_tokens(text: str) -> int:
+    return max(1, len(text or "") // 4)
 
 
-def _build_cmd(clean_model: str, format_type: str = "stream-json") -> list:
-    cfg = get_config()
-    effort = "low"
-    if "high" in clean_model:
-        effort = "high"
-    elif "medium" in clean_model or "med" in clean_model:
-        effort = "medium"
-    elif "low" in clean_model:
-        effort = "low"
-    else:
-        effort = cfg.get("active_effort", "low")
-
-    return [
-        AGY_BINARY,
-        "--input-format", "stream-json",
-        "--output-format", format_type,
-        "--model", "gemini-3.8-flash",
-        "--effort", effort,
-        "--disable-slash-commands",
-        "--dangerously-skip-permissions",
-    ]
+def _debug_log(name: str, text: str):
+    if not DEBUG_LOG:
+        return
+    try:
+        with open(os.path.join(DEBUG_LOG_DIR, name), "a", encoding="utf-8") as f:
+            f.write(text)
+    except Exception:
+        pass
 
 
-def call_agy(prompt: str, clean_model: str, profiles_to_try: list) -> tuple:
-    """Non-streaming execution calling the selected profile directly via stdin."""
-    tokens_in = max(1, len(prompt) // 4)
-    last_error = "Unknown error"
-    payload = json.dumps({"event": "user", "message": {"content": prompt}}) + "\n"
+def run_turn(prompt: str, model: str, profiles: list, internal_tools: bool = True):
+    """
+    Generator. Yields ("delta", text) while the model streams, then one final
+    ("done", {"usage": {...}, "profile": profile, "response": full_text}).
+    Tries each profile in order; raises AgyError if all fail before any text
+    was streamed. If a profile fails after streaming started, yields
+    ("error", message) and stops (we can't restart on another account
+    without duplicating output).
+    """
+    tokens_in = _estimate_tokens(prompt)
+    last_error = "No enabled account could process the request."
 
-    for profile in profiles_to_try:
+    for profile in profiles:
+        streamed = ""
+        proc = None
         with profile["semaphore"]:
-            cmd = _build_cmd(clean_model, format_type="stream-json")
-            env = _build_env(profile)
             try:
-                proc = subprocess.Popen(
-                    cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE, text=True, env=env, cwd="/tmp"
-                )
-                stdout, stderr = proc.communicate(input=payload, timeout=180)
+                proc = POOL.acquire(profile, model, internal_tools)
+                final = None
+                for ev in proc.run_turn(prompt):
+                    kind = ev.get("event")
+                    if kind == "step_update":
+                        su = ev.get("step_update", {})
+                        if su.get("step_type", "agent_response") == "agent_response":
+                            delta = su.get("text_delta")
+                            if delta:
+                                streamed += delta
+                                yield ("delta", delta)
+                    elif kind == "result":
+                        final = ev.get("result", {})
+                if final is None:
+                    raise AgyError("agy ended without a result event")
+                if final.get("status") != "SUCCESS":
+                    raise AgyError(final.get("error") or f"agy status {final.get('status')}")
 
-                try:
-                    with open("/tmp/agy_calls.log", "a") as f_log:
-                        f_log.write(f"--- CALL at {time.time()} ---\nCMD: {cmd}\nRC: {proc.returncode}\nOUT: {stdout[:300]}\nERR: {stderr[:300]}\n")
-                except Exception:
-                    pass
-
-                final_response = ""
-                final_usage = {}
-                success = False
-
-                for line in stdout.splitlines():
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        data = json.loads(line)
-                        event = data.get("event")
-                        if event == "result":
-                            res_data = data.get("result", {})
-                            if res_data.get("status") == "SUCCESS":
-                                success = True
-                                final_response = res_data.get("response", "")
-                                final_usage = res_data.get("usage", {})
-                            else:
-                                last_error = res_data.get("error") or "Execution failed"
-                        elif event == "step_update":
-                            delta = data.get("step_update", {}).get("text_delta")
-                            if delta and not final_response:
-                                final_response += delta
-                    except json.JSONDecodeError:
-                        continue
-
-                if success and final_response:
-                    in_tok = final_usage.get("input_tokens", tokens_in)
-                    out_tok = final_usage.get("output_tokens", max(1, len(final_response) // 4))
-                    _record_stats(profile, in_tok, out_tok)
-                    record_tokens(profile["id"], clean_model, in_tok, out_tok)
-                    return final_response, {
-                        "prompt_tokens": in_tok,
-                        "completion_tokens": out_tok,
-                        "total_tokens": in_tok + out_tok,
-                    }, profile
-                else:
-                    err = stderr.strip() or last_error
-                    last_error = err
-                    _record_stats(profile, tokens_in, 0, error=True)
-                    continue
-            except subprocess.TimeoutExpired:
-                last_error = "Request timed out after 180s"
-                _record_stats(profile, tokens_in, 0, error=True)
-                continue
-            except Exception as e:
+                response = final.get("response") or ""
+                if not streamed and response:
+                    streamed = response
+                    yield ("delta", response)
+                usage = final.get("usage") or {}
+                in_tok = int(usage.get("input_tokens") or tokens_in)
+                out_tok = int(usage.get("output_tokens") or _estimate_tokens(streamed))
+                _record_stats(profile, in_tok, out_tok)
+                record_tokens(profile["id"], model, in_tok, out_tok)
+                _debug_log("agy_calls.log", f"--- {time.time()} {profile['id']}/{model} ok in={in_tok} out={out_tok}\n")
+                yield ("done", {
+                    "usage": {"prompt_tokens": in_tok, "completion_tokens": out_tok, "total_tokens": in_tok + out_tok},
+                    "profile": profile,
+                    "response": streamed,
+                })
+                return
+            except GeneratorExit:
+                _record_stats(profile, tokens_in, _estimate_tokens(streamed))
+                raise
+            except AgyError as e:
                 last_error = str(e)
                 _record_stats(profile, tokens_in, 0, error=True)
-                continue
-
-    fallback = profiles_to_try[0] if profiles_to_try else PROFILES[0]
-    return f"Unable to process response: {last_error}", {
-        "prompt_tokens": tokens_in,
-        "completion_tokens": 10,
-        "total_tokens": tokens_in + 10,
-    }, fallback
-
-
-def stream_agy(prompt: str, clean_model: str, profiles_to_try: list):
-    """
-    Real-time token streaming calling the selected profile directly.
-    Guarantees that at least one content chunk is yielded.
-    Feeds prompt via stdin NDJSON stream to support arbitrarily large contexts.
-    """
-    tokens_in = max(1, len(prompt) // 4)
-    payload = json.dumps({"event": "user", "message": {"content": prompt}}) + "\n"
-
-    for profile in profiles_to_try:
-        cmd = _build_cmd(clean_model, format_type="stream-json")
-        env = _build_env(profile)
-        total_out = 0
-        started_streaming = False
-        final_usage = None
-        proc = None
-
-        with profile["semaphore"]:
-            try:
-                proc = subprocess.Popen(
-                    cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                    text=True, bufsize=1, env=env, cwd="/tmp"
-                )
-
-                def _feed_stdin(p_in, text_data):
-                    try:
-                        p_in.write(text_data)
-                        p_in.close()
-                    except Exception:
-                        pass
-
-                writer_thread = threading.Thread(target=_feed_stdin, args=(proc.stdin, payload), daemon=True)
-                writer_thread.start()
-
-                for raw_line in iter(proc.stdout.readline, ""):
-                    line = raw_line.strip()
-                    if not line:
-                        continue
-                    try:
-                        data = json.loads(line)
-                        event = data.get("event")
-                        if event == "step_update":
-                            delta = data.get("step_update", {}).get("text_delta")
-                            if delta:
-                                started_streaming = True
-                                total_out += len(delta)
-                                yield delta, profile, None
-                        elif event == "result":
-                            res_data = data.get("result", {})
-                            status = res_data.get("status")
-                            final_usage = res_data.get("usage")
-                            res_text = res_data.get("response", "")
-
-                            # If no tokens were streamed yet, yield the final response text!
-                            if not started_streaming and res_text:
-                                started_streaming = True
-                                total_out += len(res_text)
-                                yield res_text, profile, None
-
-                            if status != "SUCCESS" and not started_streaming:
-                                err = res_data.get("error") or "Execution failed"
-                                raise RuntimeError(err)
-                    except json.JSONDecodeError:
-                        continue
-
-                proc.wait()
-                if proc.returncode != 0 and not started_streaming:
-                    err_msg = proc.stderr.read().strip() if proc.stderr else "Subprocess failed"
-                    raise RuntimeError(err_msg)
-
-                # Ensure at least some non-empty content was yielded
-                if not started_streaming:
-                    fallback_text = "OK"
-                    yield fallback_text, profile, None
-                    total_out += len(fallback_text)
-
-                in_tok = final_usage.get("input_tokens", tokens_in) if final_usage else tokens_in
-                out_tok = final_usage.get("output_tokens", max(1, total_out // 4)) if final_usage else max(1, total_out // 4)
-                _record_stats(profile, in_tok, out_tok)
-                record_tokens(profile["id"], clean_model, in_tok, out_tok)
-                yield "", profile, {
-                    "prompt_tokens": in_tok,
-                    "completion_tokens": out_tok,
-                    "total_tokens": in_tok + out_tok,
-                }
-                return
-
-            except GeneratorExit:
-                if proc and proc.poll() is None:
-                    try:
-                        proc.terminate()
-                        proc.wait(timeout=2)
-                    except Exception:
-                        proc.kill()
-                out_tok = max(1, total_out // 4)
-                _record_stats(profile, tokens_in, out_tok)
-                record_tokens(profile["id"], clean_model, tokens_in, out_tok)
-                return
-
-            except Exception as e:
-                _record_stats(profile, tokens_in, 0, error=True)
-                if proc and proc.poll() is None:
-                    try:
-                        proc.terminate()
-                        proc.wait(timeout=2)
-                    except Exception:
-                        proc.kill()
-
-                if started_streaming:
-                    yield f"\n[Stream interrupted: {e}]", profile, None
+                _debug_log("agy_calls.log", f"--- {time.time()} {profile['id']}/{model} ERROR {last_error}\n")
+                if streamed:
+                    yield ("error", last_error)
                     return
-                continue
+            except Exception as e:  # unexpected: treat like an upstream failure
+                last_error = f"{type(e).__name__}: {e}"
+                _record_stats(profile, tokens_in, 0, error=True)
+                if streamed:
+                    yield ("error", last_error)
+                    return
+            finally:
+                if proc is not None:
+                    proc.close()
 
-    fallback = profiles_to_try[0] if profiles_to_try else PROFILES[0]
-    yield "Unable to obtain a response at this time.", fallback, None
+    raise AgyError(last_error)
 
 
 def make_id(prefix: str = "chatcmpl") -> str:
     return f"{prefix}-{uuid.uuid4().hex[:24]}"
 
 
-def extract_text_from_content(content) -> str:
-    if content is None:
-        return ""
-    if isinstance(content, str):
-        return content.strip()
-    if isinstance(content, list):
-        parts = []
-        for item in content:
-            if isinstance(item, str):
-                parts.append(item)
-            elif isinstance(item, dict):
-                if item.get("type") == "text":
-                    parts.append(item.get("text", ""))
-                elif "text" in item:
-                    parts.append(str(item["text"]))
-        return " ".join(parts).strip()
-    if isinstance(content, dict):
-        if content.get("type") == "text":
-            return str(content.get("text", "")).strip()
-        return str(content.get("text", "") or content.get("content", "")).strip()
-    return str(content).strip()
+def _openai_error(message: str, status: int = 502, etype: str = "server_error", code: str = "upstream_error"):
+    return jsonify({"error": {"message": message, "type": etype, "param": None, "code": code}}), status
 
 
-def format_messages_for_agy(messages: list) -> str:
-    if not messages:
-        return "Hello"
-
-    if len(messages) == 1 and messages[0].get("role") in ("user", None):
-        text = extract_text_from_content(messages[0].get("content"))
-        return text if text else "Hello"
-
-    parts = []
-    for msg in messages:
-        role = str(msg.get("role", "user")).lower()
-        content = extract_text_from_content(msg.get("content"))
-
-        if not content and "tool_calls" in msg:
-            content = str(msg.get("tool_calls"))
-
-        if not content:
-            continue
-
-        if role in ("system", "developer"):
-            parts.append(f"System: {content}")
-        elif role == "assistant":
-            parts.append(f"Assistant: {content}")
-        elif role == "tool":
-            parts.append(f"Tool Output: {content}")
-        else:
-            parts.append(f"User: {content}")
-
-    result = "\n\n".join(parts).strip()
-    return result if result else "Hello"
+def _sse(obj: dict) -> str:
+    return f"data: {json.dumps(obj, ensure_ascii=False)}\n\n"
 
 
 # ---------------------------------------------------------------------------
-# GET /v1/models & /models
+# GET /v1/models
 # ---------------------------------------------------------------------------
 
 @app.route("/v1/models", methods=["GET", "OPTIONS"])
@@ -553,57 +402,42 @@ def retrieve_model(model_id):
         return ("", 204)
     model = MODEL_INDEX.get(model_id)
     if model is None:
-        resolved = resolve_model(model_id)
-        model = MODEL_INDEX.get(resolved, AVAILABLE_MODELS[0])
+        return jsonify({"error": {"message": f"Model '{model_id}' not found.", "type": "invalid_request_error", "param": "model", "code": "model_not_found"}}), 404
     return jsonify(model)
 
 
 # ---------------------------------------------------------------------------
-# Configuration Management (GET/POST /v1/config)
+# /v1/config
 # ---------------------------------------------------------------------------
+
+def _config_view(cfg: dict) -> dict:
+    return {
+        "enabled_profiles": cfg["enabled_profiles"],
+        "routing_mode": routing_mode(cfg),
+        "active_profile": cfg["active_profile"],
+        "active_effort": cfg["active_effort"],
+        "active_model": cfg["active_model"],
+        "agy_internal_tools": cfg["agy_internal_tools"],
+        "effort_options": list(EFFORT_OPTIONS),
+        "profiles": [
+            {"id": p["id"], "name": p["name"], "email": p["email"], "enabled": p["id"] in cfg["enabled_profiles"],
+             "active": p["id"] in cfg["enabled_profiles"]}
+            for p in PROFILES
+        ],
+        "models": [
+            {"id": f"{BASE_MODEL}-{e}" if e != "auto" else BASE_MODEL, "name": f"Gemini 3.8 Flash ({e.capitalize()})",
+             "effort": e, "active": cfg["active_effort"] == e}
+            for e in EFFORT_OPTIONS
+        ],
+        "pool": POOL.stats(),
+    }
+
 
 @app.route("/v1/config", methods=["GET", "OPTIONS"])
 def get_api_config():
     if request.method == "OPTIONS":
         return ("", 204)
-    cfg = get_config()
-    active_pid = cfg.get("active_profile", "p1")
-    active_eff = cfg.get("active_effort", "low")
-
-    return jsonify({
-        "active_profile": active_pid,
-        "active_effort": active_eff,
-        "active_model": cfg.get("active_model", f"gemini-3.8-flash-{active_eff}"),
-        "profiles": [
-            {
-                "id": p["id"],
-                "name": p["name"],
-                "email": p["email"],
-                "active": p["id"] == active_pid,
-            }
-            for p in PROFILES
-        ],
-        "models": [
-            {
-                "id": "gemini-3.8-flash-low",
-                "name": "Gemini 3.8 Flash (Low)",
-                "effort": "low",
-                "active": active_eff == "low",
-            },
-            {
-                "id": "gemini-3.8-flash-medium",
-                "name": "Gemini 3.8 Flash (Medium)",
-                "effort": "medium",
-                "active": active_eff == "medium",
-            },
-            {
-                "id": "gemini-3.8-flash-high",
-                "name": "Gemini 3.8 Flash (High)",
-                "effort": "high",
-                "active": active_eff == "high",
-            },
-        ],
-    })
+    return jsonify(_config_view(get_config()))
 
 
 @app.route("/v1/config", methods=["POST", "OPTIONS"])
@@ -612,30 +446,56 @@ def update_api_config():
         return ("", 204)
     data = request.get_json(force=True, silent=True) or {}
     cfg = get_config()
+    errors = []
 
-    if "active_profile" in data:
+    if "enabled_profiles" in data:
+        req = data["enabled_profiles"]
+        if not isinstance(req, list) or not req:
+            errors.append("enabled_profiles must be a non-empty list")
+        else:
+            unknown = [pid for pid in req if pid not in PROFILE_INDEX]
+            if unknown:
+                errors.append(f"unknown profiles: {', '.join(map(str, unknown))}")
+            else:
+                cfg["enabled_profiles"] = list(dict.fromkeys(req))
+
+    if "active_profile" in data:  # backwards compatible: single-account mode
         pid = str(data["active_profile"]).strip()
         if pid in PROFILE_INDEX:
+            cfg["enabled_profiles"] = [pid]
             cfg["active_profile"] = pid
+        else:
+            errors.append(f"unknown profile: {pid}")
 
     if "active_effort" in data:
         eff = str(data["active_effort"]).strip().lower()
-        if eff in ("low", "medium", "high"):
+        if eff in EFFORT_OPTIONS:
             cfg["active_effort"] = eff
-            cfg["active_model"] = f"gemini-3.8-flash-{eff}"
+        else:
+            errors.append(f"active_effort must be one of {', '.join(EFFORT_OPTIONS)}")
 
     if "active_model" in data:
-        m = str(data["active_model"]).strip().lower()
-        if m in ("gemini-3.8-flash-low", "gemini-3.8-flash-medium", "gemini-3.8-flash-high"):
-            cfg["active_model"] = m
-            cfg["active_effort"] = m.replace("gemini-3.8-flash-", "")
+        eff = effort_from_model(data["active_model"])
+        if eff:
+            cfg["active_effort"] = eff
+        elif str(data["active_model"]).strip().lower() == BASE_MODEL:
+            cfg["active_effort"] = "auto"
+        else:
+            errors.append(f"unknown model: {data['active_model']}")
 
-    save_config(cfg)
-    return jsonify({"ok": True, "config": cfg})
+    if "agy_internal_tools" in data:
+        cfg["agy_internal_tools"] = bool(data["agy_internal_tools"])
+
+    if errors:
+        return jsonify({"ok": False, "error": "; ".join(errors), "config": _config_view(get_config())}), 400
+
+    cfg = save_config(cfg)
+    POOL.prewarm([PROFILE_INDEX[pid] for pid in cfg["enabled_profiles"]], [resolve_model(None, cfg)], cfg["agy_internal_tools"])
+    return jsonify({"ok": True, "config": _config_view(cfg)})
 
 
 # ---------------------------------------------------------------------------
-# Profile Usage & Token Info
+# Profiles / quota usage
 # ---------------------------------------------------------------------------
 
 _usage_cache: dict = {}
@@ -648,26 +508,21 @@ def _get_token_info(profile):
     try:
         with open(token_path, "r") as f:
             data = json.load(f)
-        expiry = data.get("token", {}).get("expiry", "")
-        return {"token_valid": True, "expiry": expiry}
+        return {"token_valid": True, "expiry": data.get("token", {}).get("expiry", "")}
     except Exception as e:
         return {"token_valid": False, "expiry": None, "error": str(e)}
 
 
 def _fetch_usage_raw(profile) -> dict:
-    env = _build_env(profile)
+    env = agy_runner.build_env(profile["home"])
     try:
         result = subprocess.run(
-            [AGY_BINARY, "--print", "/usage", "--output-format", "json"],
-            capture_output=True, text=True, timeout=30, env=env, cwd="/tmp"
+            list(agy_runner.AGY_COMMAND) + ["--print", "/usage", "--output-format", "json"],
+            capture_output=True, text=True, timeout=30, env=env, cwd=agy_runner.AGY_CWD,
         )
         payload = json.loads(result.stdout.strip())
         cmd_data = payload.get("command", {}).get("data", {})
-        return {
-            "ok": True,
-            "description": cmd_data.get("description", ""),
-            "groups": cmd_data.get("groups", []),
-        }
+        return {"ok": True, "description": cmd_data.get("description", ""), "groups": cmd_data.get("groups", [])}
     except Exception as e:
         return {"ok": False, "error": str(e), "groups": []}
 
@@ -687,20 +542,19 @@ def get_usage(profile, force: bool = False) -> dict:
 @app.route("/v1/profiles", methods=["GET"])
 def list_profiles():
     cfg = get_config()
-    active_pid = cfg.get("active_profile", "p1")
-    result = []
-    for p in PROFILES:
-        token_info = _get_token_info(p)
-        result.append({
-            "id": p["id"],
-            "name": p["name"],
-            "email": p["email"],
-            "home": p["home"],
-            "active": p["id"] == active_pid,
-            "token": token_info,
-            "stats": dict(p["stats"]),
-        })
-    return jsonify({"profiles": result})
+    return jsonify({
+        "routing_mode": routing_mode(cfg),
+        "profiles": [
+            {
+                "id": p["id"], "name": p["name"], "email": p["email"], "home": p["home"],
+                "enabled": p["id"] in cfg["enabled_profiles"],
+                "active": p["id"] in cfg["enabled_profiles"],
+                "token": _get_token_info(p),
+                "stats": dict(p["stats"]),
+            }
+            for p in PROFILES
+        ],
+    })
 
 
 @app.route("/v1/profiles/usage", methods=["GET"])
@@ -709,12 +563,7 @@ def all_profiles_usage():
     results: dict = {}
 
     def fetch(p):
-        results[p["id"]] = {
-            "id": p["id"],
-            "name": p["name"],
-            "email": p["email"],
-            **get_usage(p, force=force),
-        }
+        results[p["id"]] = {"id": p["id"], "name": p["name"], "email": p["email"], **get_usage(p, force=force)}
 
     threads = [threading.Thread(target=fetch, args=(p,)) for p in PROFILES]
     for t in threads:
@@ -734,8 +583,7 @@ def single_profile_usage(profile_id):
     if p is None:
         return jsonify({"error": f"Profile '{profile_id}' not found"}), 404
     force = request.args.get("force", "false").lower() == "true"
-    result = get_usage(p, force=force)
-    return jsonify({"id": p["id"], "email": p["email"], **result, "timestamp": int(time.time())})
+    return jsonify({"id": p["id"], "email": p["email"], **get_usage(p, force=force), "timestamp": int(time.time())})
 
 
 @app.route("/v1/profiles/<profile_id>/health", methods=["GET"])
@@ -743,14 +591,7 @@ def profile_health(profile_id):
     p = PROFILE_INDEX.get(profile_id)
     if p is None:
         return jsonify({"error": f"Profile '{profile_id}' not found"}), 404
-    token_info = _get_token_info(p)
-    return jsonify({
-        "id": p["id"],
-        "email": p["email"],
-        "token": token_info,
-        "stats": dict(p["stats"]),
-        "timestamp": int(time.time()),
-    })
+    return jsonify({"id": p["id"], "email": p["email"], "token": _get_token_info(p), "stats": dict(p["stats"]), "timestamp": int(time.time())})
 
 
 @app.route("/v1/tokens/usage", methods=["GET", "OPTIONS"])
@@ -758,12 +599,37 @@ def profile_health(profile_id):
 def get_tokens_usage_endpoint():
     if request.method == "OPTIONS":
         return ("", 204)
-    return jsonify(get_token_usage_summary())
+    try:
+        return jsonify(get_token_usage_summary())
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 
 # ---------------------------------------------------------------------------
-# POST /v1/chat/completions (OpenAI Compatible)
+# POST /v1/chat/completions
 # ---------------------------------------------------------------------------
+
+def _parse_chat_request(data: dict):
+    messages = data.get("messages") or []
+    if not messages and "prompt" in data:
+        messages = [{"role": "user", "content": data["prompt"]}]
+    if not messages and "input" in data:  # /v1/responses style
+        inp = data["input"]
+        messages = inp if isinstance(inp, list) else [{"role": "user", "content": inp}]
+    if not messages:
+        return None, None
+
+    tools = data.get("tools") or []
+    if not tools and data.get("functions"):
+        tools = [{"type": "function", "function": f} for f in data["functions"]]
+    tool_choice = data.get("tool_choice")
+    if tool_choice is None and data.get("function_call"):
+        fc = data["function_call"]
+        tool_choice = fc if isinstance(fc, str) else {"type": "function", "function": fc}
+    if not tools:
+        tool_choice = "none"
+    return messages, {"tools": tools, "tool_choice": tool_choice}
+
 
 @app.route("/v1/chat/completions", methods=["POST", "OPTIONS"])
 @app.route("/v1/responses", methods=["POST", "OPTIONS"])
@@ -772,143 +638,113 @@ def chat_completions():
         return ("", 204)
 
     data = request.get_json(force=True, silent=True) or {}
-    try:
-        with open("/tmp/agy_incoming.log", "a") as f_in:
-            f_in.write(f"\n=== INCOMING at {time.time()} ===\n{json.dumps(data, indent=2)}\n")
-    except Exception:
-        pass
+    _debug_log("agy_incoming.log", f"\n=== {time.time()} ===\n{json.dumps(data, indent=2, ensure_ascii=False)}\n")
 
-    messages = data.get("messages", [])
-    # Support prompt parameter if messages not sent
-    if not messages and "prompt" in data:
-        messages = [{"role": "user", "content": data["prompt"]}]
-
+    messages, tool_opts = _parse_chat_request(data)
     if not messages:
         return jsonify({"error": {"message": "Field 'messages' is required.", "type": "invalid_request_error", "param": "messages", "code": None}}), 400
 
-    prompt = format_messages_for_agy(messages)
     cfg = get_config()
+    tools_enabled = tool_opts["tool_choice"] != "none"
+    prompt = build_prompt(messages, tool_opts["tools"], tool_opts["tool_choice"])
+    requested_model = data.get("model") or cfg["active_model"]
+    model = resolve_model(requested_model, cfg)
+    profiles = get_target_profiles(cfg)
 
-    # Preserve the requested model name in the response so client validators match
-    requested_model = data.get("model") or cfg.get("active_model", "gemini-3.8-flash-low")
-    clean_model = resolve_model(requested_model)
-    is_stream = bool(data.get("stream", False))
+    if data.get("stream", False):
+        return _stream_chat(prompt, model, requested_model, profiles, cfg["agy_internal_tools"], tools_enabled)
 
-    target_profiles = get_target_profiles()
+    parser = ToolCallParser(tools_enabled)
+    done = None
+    try:
+        for kind, payload in run_turn(prompt, model, profiles, cfg["agy_internal_tools"]):
+            if kind == "delta":
+                parser.feed(payload)
+            elif kind == "done":
+                done = payload
+            elif kind == "error":
+                return _openai_error(payload)
+    except AgyError as e:
+        return _openai_error(str(e))
+    parser.finish()
 
-    if is_stream:
-        return _stream_chat(prompt, clean_model, requested_model, target_profiles)
-
-    response_text, usage_stats, used_profile = call_agy(prompt, clean_model, target_profiles)
-    created_ts = int(time.time())
-    completion_id = make_id("chatcmpl")
-
-    # Safety: ensure content is never empty
-    final_content = response_text.strip() if response_text else "Response successfully processed."
+    content = parser.text.strip()
+    message = {"role": "assistant", "content": content or None}
+    finish_reason = "stop"
+    if parser.tool_calls:
+        message["tool_calls"] = parser.tool_calls
+        finish_reason = "tool_calls"
+    elif not content:
+        message["content"] = ""
 
     resp = jsonify({
-        "id": completion_id,
+        "id": make_id("chatcmpl"),
         "object": "chat.completion",
-        "created": created_ts,
+        "created": int(time.time()),
         "model": requested_model,
-        "choices": [{
-            "index": 0,
-            "message": {
-                "role": "assistant",
-                "content": final_content,
-                "reasoning_content": None,
-            },
-            "finish_reason": "stop",
-            "logprobs": None,
-        }],
-        "usage": usage_stats,
+        "choices": [{"index": 0, "message": message, "finish_reason": finish_reason, "logprobs": None}],
+        "usage": done["usage"],
         "system_fingerprint": None,
     })
-    resp.headers["X-Profile-Used"] = used_profile["id"]
+    resp.headers["X-Profile-Used"] = done["profile"]["id"]
+    resp.headers["X-Model-Used"] = model
     return resp
 
 
-def _stream_chat(prompt: str, clean_model: str, requested_model: str, target_profiles: list) -> Response:
+def _stream_chat(prompt, model, requested_model, profiles, internal_tools, tools_enabled) -> Response:
     cid = make_id("chatcmpl")
     ts = int(time.time())
 
-    def generate():
-        first = True
-        has_content = False
-
-        for chunk, profile, usage in stream_agy(prompt, clean_model, target_profiles):
-            if first:
-                first = False
-                init_chunk = {
-                    "id": cid,
-                    "object": "chat.completion.chunk",
-                    "created": ts,
-                    "model": requested_model,
-                    "choices": [{
-                        "index": 0,
-                        "delta": {"role": "assistant"},
-                        "finish_reason": None,
-                    }],
-                }
-                yield f"data: {json.dumps(init_chunk)}\n\n"
-
-            if chunk:
-                has_content = True
-                token_chunk = {
-                    "id": cid,
-                    "object": "chat.completion.chunk",
-                    "created": ts,
-                    "model": requested_model,
-                    "choices": [{
-                        "index": 0,
-                        "delta": {"content": chunk},
-                        "finish_reason": None,
-                    }],
-                }
-                yield f"data: {json.dumps(token_chunk)}\n\n"
-
-        # Guard: if no content chunk was yielded, guarantee at least one token chunk is emitted!
-        if not has_content:
-            fallback_chunk = {
-                "id": cid,
-                "object": "chat.completion.chunk",
-                "created": ts,
-                "model": requested_model,
-                "choices": [{
-                    "index": 0,
-                    "delta": {"content": "Response processed."},
-                    "finish_reason": None,
-                }],
-            }
-            yield f"data: {json.dumps(fallback_chunk)}\n\n"
-
-        stop_chunk = {
-            "id": cid,
-            "object": "chat.completion.chunk",
-            "created": ts,
-            "model": requested_model,
-            "choices": [{
-                "index": 0,
-                "delta": {},
-                "finish_reason": "stop",
-            }],
+    def chunk(delta: dict, finish_reason=None, extra: dict = None):
+        body = {
+            "id": cid, "object": "chat.completion.chunk", "created": ts, "model": requested_model,
+            "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason, "logprobs": None}],
         }
-        yield f"data: {json.dumps(stop_chunk)}\n\n"
+        if extra:
+            body.update(extra)
+        return _sse(body)
+
+    def generate():
+        parser = ToolCallParser(tools_enabled)
+        yield chunk({"role": "assistant", "content": ""})
+        done = None
+        try:
+            for kind, payload in run_turn(prompt, model, profiles, internal_tools):
+                if kind == "delta":
+                    text = parser.feed(payload)
+                    if text:
+                        yield chunk({"content": text})
+                elif kind == "done":
+                    done = payload
+                elif kind == "error":
+                    yield _sse({"error": {"message": payload, "type": "server_error", "code": "upstream_error"}})
+                    yield "data: [DONE]\n\n"
+                    return
+        except AgyError as e:
+            yield _sse({"error": {"message": str(e), "type": "server_error", "code": "upstream_error"}})
+            yield "data: [DONE]\n\n"
+            return
+
+        tail = parser.finish()
+        if tail:
+            yield chunk({"content": tail})
+
+        finish = "stop"
+        if parser.tool_calls:
+            finish = "tool_calls"
+            for i, call in enumerate(parser.tool_calls):
+                yield chunk({"tool_calls": [{"index": i, "id": call["id"], "type": "function",
+                                             "function": {"name": call["function"]["name"], "arguments": ""}}]})
+                yield chunk({"tool_calls": [{"index": i, "function": {"arguments": call["function"]["arguments"]}}]})
+        yield chunk({}, finish, {"usage": done["usage"] if done else None})
         yield "data: [DONE]\n\n"
 
-    return Response(
-        stream_with_context(generate()),
-        mimetype="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
-    )
+    headers = {"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no", "X-Model-Used": model}
+    return Response(stream_with_context(generate()), mimetype="text/event-stream", headers=headers)
 
 
 # ---------------------------------------------------------------------------
-# POST /v1/completions (Legacy completions)
+# POST /v1/completions (legacy)
 # ---------------------------------------------------------------------------
 
 @app.route("/v1/completions", methods=["POST", "OPTIONS"])
@@ -918,114 +754,66 @@ def completions():
 
     data = request.get_json(force=True, silent=True) or {}
     prompt = data.get("prompt")
-    if not prompt:
-        msgs = data.get("messages", [])
-        if msgs:
-            prompt = format_messages_for_agy(msgs)
+    if isinstance(prompt, list):
+        prompt = " ".join(str(p) for p in prompt)
+    if not prompt and data.get("messages"):
+        prompt = build_prompt(data["messages"])
     if not prompt:
         return jsonify({"error": {"message": "Field 'prompt' is required.", "type": "invalid_request_error", "param": "prompt", "code": None}}), 400
 
-    if isinstance(prompt, list):
-        prompt = " ".join(str(p) for p in prompt)
-
     cfg = get_config()
-    requested_model = data.get("model") or cfg.get("active_model", "gemini-3.8-flash-low")
-    clean_model = resolve_model(requested_model)
-    is_stream = bool(data.get("stream", False))
-    target_profiles = get_target_profiles()
-
-    if is_stream:
-        return _stream_completions(prompt, clean_model, requested_model, target_profiles)
-
-    response_text, usage_stats, used_profile = call_agy(prompt, clean_model, target_profiles)
-    created_ts = int(time.time())
-    completion_id = make_id("cmpl")
-
-    final_content = response_text.strip() if response_text else "OK"
-
-    resp = jsonify({
-        "id": completion_id,
-        "object": "text_completion",
-        "created": created_ts,
-        "model": requested_model,
-        "choices": [{
-            "text": final_content,
-            "index": 0,
-            "logprobs": None,
-            "finish_reason": "stop",
-        }],
-        "usage": usage_stats,
-    })
-    resp.headers["X-Profile-Used"] = used_profile["id"]
-    return resp
-
-
-def _stream_completions(prompt: str, clean_model: str, requested_model: str, target_profiles: list) -> Response:
+    requested_model = data.get("model") or cfg["active_model"]
+    model = resolve_model(requested_model, cfg)
+    profiles = get_target_profiles(cfg)
     cid = make_id("cmpl")
     ts = int(time.time())
 
-    def generate():
-        has_content = False
-        for chunk, profile, usage in stream_agy(prompt, clean_model, target_profiles):
-            if chunk:
-                has_content = True
-                payload = {
-                    "id": cid,
-                    "object": "text_completion",
-                    "created": ts,
-                    "model": requested_model,
-                    "choices": [{
-                        "text": chunk,
-                        "index": 0,
-                        "logprobs": None,
-                        "finish_reason": None,
-                    }],
-                }
-                yield f"data: {json.dumps(payload)}\n\n"
+    if data.get("stream", False):
+        def generate():
+            try:
+                for kind, payload in run_turn(prompt, model, profiles, cfg["agy_internal_tools"]):
+                    if kind == "delta":
+                        yield _sse({"id": cid, "object": "text_completion", "created": ts, "model": requested_model,
+                                    "choices": [{"text": payload, "index": 0, "logprobs": None, "finish_reason": None}]})
+                    elif kind == "error":
+                        yield _sse({"error": {"message": payload, "type": "server_error", "code": "upstream_error"}})
+                        yield "data: [DONE]\n\n"
+                        return
+            except AgyError as e:
+                yield _sse({"error": {"message": str(e), "type": "server_error", "code": "upstream_error"}})
+                yield "data: [DONE]\n\n"
+                return
+            yield _sse({"id": cid, "object": "text_completion", "created": ts, "model": requested_model,
+                        "choices": [{"text": "", "index": 0, "logprobs": None, "finish_reason": "stop"}]})
+            yield "data: [DONE]\n\n"
 
-        if not has_content:
-            fallback_payload = {
-                "id": cid,
-                "object": "text_completion",
-                "created": ts,
-                "model": requested_model,
-                "choices": [{
-                    "text": "OK",
-                    "index": 0,
-                    "logprobs": None,
-                    "finish_reason": None,
-                }],
-            }
-            yield f"data: {json.dumps(fallback_payload)}\n\n"
+        return Response(stream_with_context(generate()), mimetype="text/event-stream",
+                        headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"})
 
-        stop_payload = {
-            "id": cid,
-            "object": "text_completion",
-            "created": ts,
-            "model": requested_model,
-            "choices": [{
-                "text": "",
-                "index": 0,
-                "logprobs": None,
-                "finish_reason": "stop",
-            }],
-        }
-        yield f"data: {json.dumps(stop_payload)}\n\n"
-        yield "data: [DONE]\n\n"
+    text, done = "", None
+    try:
+        for kind, payload in run_turn(prompt, model, profiles, cfg["agy_internal_tools"]):
+            if kind == "delta":
+                text += payload
+            elif kind == "done":
+                done = payload
+            elif kind == "error":
+                return _openai_error(payload)
+    except AgyError as e:
+        return _openai_error(str(e))
 
-    return Response(
-        stream_with_context(generate()),
-        mimetype="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
-    )
+    resp = jsonify({
+        "id": cid, "object": "text_completion", "created": ts, "model": requested_model,
+        "choices": [{"text": text.strip(), "index": 0, "logprobs": None, "finish_reason": "stop"}],
+        "usage": done["usage"],
+    })
+    resp.headers["X-Profile-Used"] = done["profile"]["id"]
+    resp.headers["X-Model-Used"] = model
+    return resp
 
 
 # ---------------------------------------------------------------------------
-# Health & Status
+# Health
 # ---------------------------------------------------------------------------
 
 @app.route("/v1/health", methods=["GET"])
@@ -1035,10 +823,14 @@ def health():
     return jsonify({
         "status": "ok",
         "timestamp": int(time.time()),
-        "active_profile": cfg.get("active_profile", "p1"),
-        "active_effort": cfg.get("active_effort", "low"),
-        "active_model": cfg.get("active_model", "gemini-3.8-flash-low"),
+        "agy_binary_found": agy_runner.resolve_binary_present(),
+        "routing_mode": routing_mode(cfg),
+        "enabled_profiles": cfg["enabled_profiles"],
+        "active_profile": cfg["active_profile"],
+        "active_effort": cfg["active_effort"],
+        "active_model": cfg["active_model"],
         "models_available": [m["id"] for m in AVAILABLE_MODELS],
+        "pool": POOL.stats(),
     })
 
 
@@ -1047,8 +839,30 @@ def not_found(e):
     return jsonify({"error": {"message": "Endpoint not found.", "type": "invalid_request_error", "param": None, "code": "endpoint_not_found"}}), 404
 
 
+# ---------------------------------------------------------------------------
+# Anthropic Messages API (Claude Code) on the same engine
+# ---------------------------------------------------------------------------
+
+import anthropic_api  # noqa: E402
+
+anthropic_api.register(app, globals_module := __import__(__name__))
+
+
+# ---------------------------------------------------------------------------
+# Startup: pre-warm the pool for the current configuration
+# ---------------------------------------------------------------------------
+
+def _startup_prewarm():
+    if os.getenv("AGY_PREWARM_ON_START", "true").lower() == "false":
+        return
+    cfg = get_config()
+    POOL.prewarm([PROFILE_INDEX[pid] for pid in cfg["enabled_profiles"]], [resolve_model(None, cfg)], cfg["agy_internal_tools"])
+
+
+_startup_prewarm()
+
+
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "8080"))
-    debug = os.getenv("DEBUG", "false").lower() == "true"
-    print(f"Starting Gemini 3.8 Flash Exclusive API on 0.0.0.0:{port}")
-    app.run(host="0.0.0.0", port=port, debug=debug)
+    print(f"Starting Antigravity OpenAI-compatible API on 0.0.0.0:{port}")
+    app.run(host="0.0.0.0", port=port, debug=DEBUG_LOG, threaded=True)

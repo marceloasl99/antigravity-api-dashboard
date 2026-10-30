@@ -188,6 +188,21 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       background: var(--surface); color: var(--muted); border: 1px solid var(--border);
     }
 
+    .profile-select-card.disabled { opacity: 0.55; }
+    .rr-badge {
+      font-size: 0.65rem; font-weight: 700; padding: 2px 7px; border-radius: 6px; margin-left: 6px;
+      background: rgba(168, 85, 247, 0.18); color: #c084fc; border: 1px solid rgba(168, 85, 247, 0.4);
+    }
+    .engine-row { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+    .engine-hint { font-size: 0.78rem; color: var(--muted); max-width: 520px; }
+    .btn-toggle {
+      background: var(--surface2); border: 1px solid var(--border); color: var(--text);
+      padding: 7px 14px; border-radius: 8px; cursor: pointer; font-weight: 700; font-size: 0.8rem;
+    }
+    .btn-toggle.on { border-color: var(--green); color: var(--green); }
+    .effort-card.active.auto { border-color: #38bdf8; background: rgba(56, 189, 248, 0.08); }
+    .effort-card.active.auto .effort-tag { background: #38bdf8; color: #000; }
+
     /* Model effort selector */
     .effort-select-grid {
       display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
@@ -485,10 +500,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       </div>
     </div>
 
-    <!-- 1. Active Account -->
+    <!-- 1. Enabled Accounts -->
     <div class="config-group">
       <div class="group-label">
-        👤 1. Select Active Account (Direct API Routing)
+        👤 1. Enabled Accounts — <span id="routingModeLabel">1 account = direct routing &bull; 2+ accounts = round robin</span>
       </div>
       <div class="profile-select-grid" id="profileSelectGrid">
         <!-- Rendered by JS -->
@@ -498,9 +513,18 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <!-- 2. Reasoning Effort (Gemini 3.8 Flash) -->
     <div class="config-group">
       <div class="group-label">
-        🧠 2. Select Reasoning Effort — Gemini 3.8 Flash
+        🧠 2. Select Reasoning Effort — Gemini 3.8 Flash (a model suffix sent by the client always wins)
       </div>
       <div class="effort-select-grid" id="effortSelectGrid">
+        <div class="effort-card" id="card-effort-auto" onclick="selectEffort('auto')">
+          <div class="effort-top">
+            <span class="effort-title">⚡ Auto</span>
+            <span class="effort-tag" id="tag-effort-auto">SELECT</span>
+          </div>
+          <div class="effort-model">gemini-3.8-flash</div>
+          <div class="effort-desc">Uses the effort suffix of the model requested by the client (<code>-low</code>, <code>-medium</code>, <code>-high</code>). Without a suffix, Low.</div>
+        </div>
+
         <div class="effort-card" id="card-effort-low" onclick="selectEffort('low')">
           <div class="effort-top">
             <span class="effort-title">🟢 Low</span>
@@ -527,6 +551,16 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           <div class="effort-model">gemini-3.8-flash-high</div>
           <div class="effort-desc">Deep and reflective reasoning. Ideal for complex coding, architectural design, and subtle logic.</div>
         </div>
+      </div>
+    </div>
+
+    <!-- 3. Engine options -->
+    <div class="config-group">
+      <div class="group-label">🛠️ 3. Engine</div>
+      <div class="engine-row">
+        <button class="btn-toggle" id="internalToolsBtn" onclick="toggleInternalTools()">agy internal tools: —</button>
+        <span class="engine-hint">When ON the CLI may run its own tools (shell, files) on this server. OpenAI <code>tools</code>/<code>tool_calls</code> from clients work either way.</span>
+        <span class="pill" id="poolLabel">pool: —</span>
       </div>
     </div>
 
@@ -654,15 +688,19 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
 
   <footer>
-    Antigravity API Service &bull; Endpoints: <code>/v1/chat/completions</code> &bull; <code>/v1/models</code> &bull; <code>/v1/health</code>
+    Antigravity API Service &bull; Endpoints: <code>/v1/chat/completions</code> (tools supported) &bull; <code>/v1/models</code> &bull; <code>/v1/config</code> &bull; <code>/v1/health</code>
   </footer>
 
   <script>
     let privacyMode = true; // Enabled by default to protect sensitive emails
     let currentConfig = {
+      enabled_profiles: ['p1'],
+      routing_mode: 'direct',
       active_profile: 'p1',
       active_effort: 'low',
-      active_model: 'gemini-3.8-flash-low'
+      active_model: 'gemini-3.8-flash-low',
+      agy_internal_tools: true,
+      pool: null
     };
     let profilesList = [];
     let autoRefreshTimer = null;
@@ -759,10 +797,12 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
     /* ── RENDER CONFIG UI ── */
     function renderConfigUI() {
-      const activePid = currentConfig.active_profile || 'p1';
+      const enabled = currentConfig.enabled_profiles || [currentConfig.active_profile || 'p1'];
       const activeEff = currentConfig.active_effort || 'low';
+      const isRR = enabled.length > 1;
 
       const effortNames = {
+        auto: 'Auto',
         low: 'Low',
         medium: 'Medium',
         high: 'High',
@@ -777,26 +817,27 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         };
       });
 
-      const activeProfileMeta = pMap[activePid] || {
-        name: `Profile ${activePid.toUpperCase()}`,
-        email: ''
-      };
+      const enabledNames = enabled.map(pid => (pMap[pid] || { name: `Profile ${pid.toUpperCase()}` }).name);
+      const modeLabel = isRR ? `Round robin (${enabled.length} accounts)` : 'Direct';
 
       // Header Badge
       document.getElementById('activeStatusBadge').innerHTML =
-        `★ Active API: <b>${activeProfileMeta.name}</b> &bull; <b>${effortNames[activeEff] || activeEff}</b>`;
+        `★ ${modeLabel}: <b>${enabledNames.join(' → ')}</b> &bull; Effort <b>${effortNames[activeEff] || activeEff}</b>`;
       document.getElementById('activeProfileSummary').textContent =
-        `${activeProfileMeta.name} (${activeEff.toUpperCase()})`;
+        `${enabled.map(p => p.toUpperCase()).join('+')} (${activeEff.toUpperCase()})`;
+      document.getElementById('routingModeLabel').innerHTML = isRR
+        ? `<span class="rr-badge">ROUND ROBIN</span> requests alternate between the enabled accounts; a failing account falls back to the next one`
+        : `direct routing to one account &bull; enable a second account to activate round robin`;
 
-      // Profile grid
+      // Profile grid (toggles)
       const pGrid = document.getElementById('profileSelectGrid');
       const profileIds = profilesList.length ? profilesList.map(p => p.id) : ['p1', 'p2', 'p3'];
 
       pGrid.innerHTML = profileIds.map(pid => {
-        const isActive = pid === activePid;
+        const isOn = enabled.includes(pid);
         const meta = pMap[pid] || { name: `Profile ${pid.toUpperCase()}`, email: '' };
         return `
-          <div class="profile-select-card ${isActive ? 'active' : ''}" onclick="selectProfile('${pid}')">
+          <div class="profile-select-card ${isOn ? 'active' : 'disabled'}" onclick="toggleProfile('${pid}')" title="${isOn ? 'Click to disable' : 'Click to enable'}">
             <div class="card-left">
               <div class="p-avatar ${pid}">${pid.toUpperCase()}</div>
               <div>
@@ -804,58 +845,88 @@ DASHBOARD_HTML = """<!DOCTYPE html>
                 <div class="p-meta-email">${maskEmail(meta.email)}</div>
               </div>
             </div>
-            <div class="active-tag">${isActive ? '★ ACTIVE' : 'ACTIVATE'}</div>
+            <div class="active-tag">${isOn ? '★ ENABLED' : 'DISABLED'}</div>
           </div>
         `;
       }).join('');
 
       // Effort cards
-      ['low', 'medium', 'high'].forEach(eff => {
+      ['auto', 'low', 'medium', 'high'].forEach(eff => {
         const card = document.getElementById(`card-effort-${eff}`);
         const tag = document.getElementById(`tag-effort-${eff}`);
         const isEffActive = eff === activeEff;
         card.className = `effort-card ${isEffActive ? 'active ' + eff : ''}`;
         tag.textContent = isEffActive ? '★ ACTIVE' : 'SELECT';
       });
+
+      // Engine row
+      const toolsOn = currentConfig.agy_internal_tools !== false;
+      const tBtn = document.getElementById('internalToolsBtn');
+      tBtn.textContent = `agy internal tools: ${toolsOn ? 'ON' : 'OFF'}`;
+      tBtn.className = `btn-toggle ${toolsOn ? 'on' : ''}`;
+      const pool = currentConfig.pool;
+      document.getElementById('poolLabel').textContent = pool
+        ? `warm pool: ${pool.ready_total} ready, ${pool.warming} warming, ${pool.hits} hits / ${pool.misses} misses`
+        : 'warm pool: —';
     }
 
-    /* ── SAVE CONFIG ACTIONS ── */
-    async function selectProfile(pid) {
-      if (currentConfig.active_profile === pid) return;
+    async function postConfig(body) {
+      const resp = await fetch('/api/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+      const res = await resp.json();
+      if (res.ok && res.config) {
+        currentConfig = res.config;
+        renderConfigUI();
+      }
+      return res;
+    }
+
+    async function toggleProfile(pid) {
+      const enabled = (currentConfig.enabled_profiles || []).slice();
+      const idx = enabled.indexOf(pid);
+      if (idx >= 0) {
+        if (enabled.length === 1) { showToast('At least one account must stay enabled.', false); return; }
+        enabled.splice(idx, 1);
+      } else {
+        enabled.push(pid);
+      }
       try {
-        const resp = await fetch('/api/config', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ active_profile: pid })
-        });
-        const res = await resp.json();
+        const res = await postConfig({ enabled_profiles: enabled });
         if (res.ok) {
-          currentConfig.active_profile = pid;
-          renderConfigUI();
-          showToast(`Account activated: Profile ${pid.toUpperCase()} is now serving all API requests.`);
+          showToast(enabled.length > 1
+            ? `Round robin across ${enabled.map(p => p.toUpperCase()).join(', ')}.`
+            : `Direct routing to ${enabled[0].toUpperCase()}.`);
           loadProfiles();
         } else {
-          showToast('Error switching profile: ' + (res.error || 'Failed'), false);
+          showToast('Error updating accounts: ' + (res.error || 'Failed'), false);
         }
       } catch (e) {
-        showToast('Connection error saving profile: ' + e.message, false);
+        showToast('Connection error saving accounts: ' + e.message, false);
       }
     }
 
+    async function toggleInternalTools() {
+      try {
+        const res = await postConfig({ agy_internal_tools: !(currentConfig.agy_internal_tools !== false) });
+        if (res.ok) showToast(`agy internal tools ${res.config.agy_internal_tools ? 'enabled' : 'disabled'}.`);
+        else showToast('Error: ' + (res.error || 'Failed'), false);
+      } catch (e) {
+        showToast('Connection error: ' + e.message, false);
+      }
+    }
+
+    /* ── SAVE CONFIG ACTIONS ── */
     async function selectEffort(effort) {
       if (currentConfig.active_effort === effort) return;
       try {
-        const resp = await fetch('/api/config', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ active_effort: effort })
-        });
-        const res = await resp.json();
+        const res = await postConfig({ active_effort: effort });
         if (res.ok) {
-          currentConfig.active_effort = effort;
-          currentConfig.active_model = `gemini-3.8-flash-${effort}`;
-          renderConfigUI();
-          showToast(`Reasoning effort changed to Gemini 3.8 Flash (${effort.toUpperCase()}).`);
+          showToast(effort === 'auto'
+            ? 'Effort set to Auto: follows the model suffix sent by each client (default Low).'
+            : `Reasoning effort changed to Gemini 3.8 Flash (${effort.toUpperCase()}).`);
         } else {
           showToast('Error switching reasoning effort: ' + (res.error || 'Failed'), false);
         }
@@ -899,7 +970,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
         grid.innerHTML = items.map(p => {
           const pid = p.id;
-          const isActive = pid === currentConfig.active_profile;
+          const isActive = (currentConfig.enabled_profiles || [currentConfig.active_profile]).includes(pid);
           const groups = p.groups || [];
 
           const groupsHtml = groups.map(g => {
@@ -940,11 +1011,11 @@ DASHBOARD_HTML = """<!DOCTYPE html>
                 <div class="usage-card-left">
                   <div class="usage-avatar p-avatar ${pid}">${pid.toUpperCase()}</div>
                   <div>
-                    <div class="usage-card-name">${formatProfileName(p.name, pid)} ${isActive ? '<span style="color:var(--green);font-size:.7rem">(ACTIVE IN API)</span>' : ''}</div>
+                    <div class="usage-card-name">${formatProfileName(p.name, pid)} ${isActive ? '<span style="color:var(--green);font-size:.7rem">(ENABLED IN API)</span>' : ''}</div>
                     <div class="usage-card-email">${maskEmail(p.email)}</div>
                   </div>
                 </div>
-                ${!isActive ? `<button class="btn-refresh" style="padding:6px 12px;font-size:.75rem;" onclick="selectProfile('${pid}')">Activate</button>` : '<span style="color:var(--green);font-size:.8rem;font-weight:700">✓ In Use</span>'}
+                ${!isActive ? `<button class="btn-refresh" style="padding:6px 12px;font-size:.75rem;" onclick="toggleProfile('${pid}')">Enable</button>` : '<span style="color:var(--green);font-size:.8rem;font-weight:700">✓ In Use</span>'}
               </div>
               <div class="usage-groups">
                 ${groupsHtml || '<div style="padding:20px;color:var(--muted)">No quota data available</div>'}
@@ -1325,7 +1396,10 @@ def api_token_usage():
 
 @app.route("/api/health")
 def api_health():
-    return jsonify({"status": "ok", "timestamp": int(time.time())})
+    data, err = _proxy("/v1/health")
+    if err:
+        return jsonify({"status": "degraded", "api_error": err, "timestamp": int(time.time())}), 502
+    return jsonify({"status": "ok", "timestamp": int(time.time()), "api": data})
 
 
 @app.errorhandler(404)
