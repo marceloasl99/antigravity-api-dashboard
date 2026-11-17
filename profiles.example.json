@@ -19,5 +19,12 @@
     "email": "your-account-3@gmail.com",
     "home": "/root/.agy-perfil3",
     "concurrency": 4
+  },
+  {
+    "id": "p4",
+    "name": "Profile 4",
+    "email": "your-account-4@gmail.com",
+    "home": "/root/.agy-perfil4",
+    "concurrency": 4
   }
 ]

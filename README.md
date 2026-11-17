@@ -1,10 +1,10 @@
 <div align="center">
 
-# ⚡ Antigravity API & Dashboard (v3.0)
-### *OpenAI-Compatible Gateway for Gemini 3.8 Flash — Warm Process Pool, Tool Calling, Multi-Account Round Robin & Quota Monitoring*
+# ⚡ Antigravity API & Dashboard (v4.0)
+### *OpenAI & Anthropic Compatible Gateway for Gemini, Claude & GPT-OSS — Multi-Tier Profile Architecture, Account-Level Fixed Default Models, Warm Process Pool & Quota Monitoring*
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg?style=for-the-badge)](LICENSE)
-[![Version: 3.0](https://img.shields.io/badge/Version-3.0.0-success.svg?style=for-the-badge)](https://github.com/marceloasl99/antigravity-api-dashboard/releases)
+[![Version: 4.0](https://img.shields.io/badge/Version-4.0.0-success.svg?style=for-the-badge)](https://github.com/marceloasl99/antigravity-api-dashboard/releases)
 [![Python: 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB.svg?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
 [![OpenAI Compatible](https://img.shields.io/badge/API-OpenAI%20v1%20Compatible-412991.svg?style=for-the-badge&logo=openai&logoColor=white)](https://platform.openai.com/docs/api-reference)
 [![Flask](https://img.shields.io/badge/Backend-Flask%20%26%20Gunicorn-000000.svg?style=for-the-badge&logo=flask&logoColor=white)](https://palletsprojects.com/p/flask/)
@@ -12,7 +12,7 @@
 
 <p align="center">
   <a href="#-overview">Overview</a> •
-  <a href="#-whats-new-in-v30">What's New in v3.0</a> •
+  <a href="#-whats-new-in-v40">What's New in v4.0</a> •
   <a href="#-dashboard-preview">Dashboard Preview</a> •
   <a href="#-architecture">Architecture</a> •
   <a href="#-quickstart">Quickstart</a> •
@@ -29,15 +29,26 @@
 
 ## 📖 Overview
 
-**Antigravity API & Dashboard** converts Google's **Antigravity CLI (`agy`)** into a high-performance, self-hosted **OpenAI-compatible REST API gateway**. It empowers you to run **Gemini 3.8 Flash** with selectable reasoning effort levels, monitor real-time token consumption across multi-worker environments, switch active Google accounts with zero downtime, and inspect your Google account quotas through a modern web control panel.
+**Antigravity API & Dashboard** converts Google's **Antigravity CLI (`agy`)** into a high-performance, self-hosted **OpenAI and Anthropic-compatible REST API gateway**. It empowers you to run **Gemini (Flash, Argon, Hydrogen, Orchestrator)**, **Claude (Opus 5.5, Sonnet 5.5, Opus 4.6, Sonnet 4.6)**, and **GPT-OSS** models with custom reasoning effort levels, monitor real-time token consumption across multi-worker environments, define fixed default models per Google account, switch active accounts with zero downtime, and inspect your Google account quotas through a modern web control panel.
 
-Designed for self-hosters and power users integrating Gemini into tools like **LibreChat**, **OpenWebUI**, **LiteLLM**, **Cursor**, **Continue.dev**, and **LangChain**.
+Designed for self-hosters and power users integrating local AI gateways into tools like **Claude Code**, **LibreChat**, **OpenWebUI**, **LiteLLM**, **Cursor**, **Continue.dev**, and **LangChain**.
 
 > 🔒 **100% Private & Self-Hosted**: Runs entirely in your private homelab or container (Proxmox LXC, Docker, Ubuntu/Debian). Built-in Privacy Mode protects and masks sensitive account credentials and emails.
 
 ---
 
-## 🚀 What's New in v3.0
+## 🚀 What's New in v4.0
+
+| Area | v3.0 | v4.0 |
+| :--- | :--- | :--- |
+| **Profile Support & Tiers** | Profiles 1–3 (Gemini 3.8 Flash, Claude 4.6, GPT-OSS) | **4 Profiles supported (`p1`, `p2`, `p3`, `p4`)**, with support for advanced tier profiles (`p4`) having access to next-gen Gemini 4 and Claude 5.5 models. |
+| **Model Selection** | Limited catalog (6 models) | **All existing LLMs supported (20 unique models across profiles)**: `gemini-4-argon-*`, `gemini-4-hydrogen-*`, `gemini-pro-orchestrator-g1-pro`, `claude-opus-5-5-*`, `claude-sonnet-5-5-*`, `gemini-3.8-flash-*`, `claude-*-4-6`, and `gpt-oss-120b-medium`. Profile 4 exposes all 18 models. |
+| **Per-Account Fixed Default Model** | Single global model setting | **Fixed default model per Google account**: Choose and fix any supported model individually for each profile account directly from the Web Dashboard. |
+| **Cross-Account Model Resolution** | Strict model matching per profile | **Intelligent model resolution (`resolve_model_for_profile`)**: Handles model alias resolution, effort extraction, and maps generic requests (e.g. `claude-sonnet`) to the appropriate tier model (`claude-sonnet-5-5` on `p4`, `claude-sonnet-4-6` on `p1-p3`). |
+| **Warm Pool Multi-Model Prewarming** | Prewarmed only global default model | Prewarms the designated default model for each active account upon configuration save and startup. |
+| **Dashboard UI** | Simple account toggles | **Interactive Model Selector per Account Card** on Port 80, showing available model count and persistent selection via `POST /api/config`. |
+
+---
 
 | Area | v2.0 | v3.0 |
 | :--- | :--- | :--- |
@@ -438,7 +449,22 @@ endpoints:
 
 ## 📜 Version History
 
-### Version 3.0.0 (Current)
+### Version 4.0.0 (Current)
+- **Profile 4 Support**: Added support for 4th profile account with advanced tier capabilities.
+- **Full LLM Catalog (20 Models)**:
+  - Gemini 4 Argon (`low`, `medium`, `high`)
+  - Gemini 4 Hydrogen (`low`, `medium`, `high`, `xhigh`)
+  - Gemini Orchestrator (`gemini-pro-orchestrator-g1-pro`)
+  - Claude Opus 5.5 (`low`, `medium`, `high`)
+  - Claude Sonnet 5.5 (`low`, `medium`, `high`)
+  - Gemini 3.8 Flash (`low`, `medium`, `high`, `auto`)
+  - Claude Sonnet 4.6 & Claude Opus 4.6 Thinking
+  - GPT-OSS 120B (Medium)
+- **Account-Level Fixed Default Model**: Select and fix a designated default model for each Google account directly from the UI or via API (`profile_models`).
+- **Dynamic Cross-Account Fallback & Routing**: Automatic resolution of model aliases and tiers when round-robin routing between different account tiers.
+- **Enhanced Web Dashboard**: Embedded model dropdown in account cards on Port 80, dynamic model counts, and improved layout responsiveness.
+
+### Version 3.0.0
 - Warm process pool (`agy_runner.py`) — requests skip the CLI cold start.
 - OpenAI tool calling (`tool_calling.py`), streaming included.
 - 1–3 enabled accounts: direct routing or round robin with fallback.

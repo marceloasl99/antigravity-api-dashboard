@@ -50,11 +50,56 @@ EFFORT_OPTIONS = EFFORTS + ("auto",)
 DEFAULT_EFFORT = "low"
 BASE_MODEL = "gemini-3.8-flash"
 
-# Model ids as `agy models` lists them (agy 1.4.10). Effort for Gemini is part
-# of the id; the other models take no effort flag at all.
-GEMINI_MODELS = tuple(f"{BASE_MODEL}-{e}" for e in EFFORTS)
-OTHER_MODELS = ("claude-sonnet-4-6", "claude-opus-4-6-thinking", "gpt-oss-120b-medium")
-CLI_MODELS = GEMINI_MODELS + OTHER_MODELS
+# Model ids per profile and globally
+P13_MODELS = (
+    "gemini-3.8-flash-high",
+    "gemini-3.8-flash-medium",
+    "gemini-3.8-flash-low",
+    "claude-sonnet-4-6",
+    "claude-opus-4-6-thinking",
+    "gpt-oss-120b-medium",
+)
+
+P4_MODELS = (
+    "gemini-4-argon-medium",
+    "gemini-4-argon-high",
+    "gemini-4-argon-low",
+    "gemini-4-hydrogen-high",
+    "gemini-4-hydrogen-xhigh",
+    "gemini-4-hydrogen-medium",
+    "gemini-4-hydrogen-low",
+    "gemini-pro-orchestrator-g1-pro",
+    "gemini-3.8-flash-high",
+    "gemini-3.8-flash-medium",
+    "gemini-3.8-flash-low",
+    "claude-opus-5-5-low",
+    "claude-opus-5-5-medium",
+    "claude-opus-5-5-high",
+    "claude-sonnet-5-5-low",
+    "claude-sonnet-5-5-medium",
+    "claude-sonnet-5-5-high",
+    "gpt-oss-120b-medium",
+)
+
+PROFILE_AVAILABLE_MODELS = {
+    "p1": list(P13_MODELS),
+    "p2": list(P13_MODELS),
+    "p3": list(P13_MODELS),
+    "p4": list(P4_MODELS),
+}
+
+PROFILE_DEFAULT_MODELS = {
+    "p1": "gemini-3.8-flash-low",
+    "p2": "gemini-3.8-flash-low",
+    "p3": "gemini-3.8-flash-low",
+    "p4": "gemini-4-argon-low",
+}
+
+ALL_CLI_MODELS = tuple(dict.fromkeys(P4_MODELS + P13_MODELS))
+CLI_MODELS = ALL_CLI_MODELS
+GEMINI_MODELS = tuple(m for m in ALL_CLI_MODELS if m.startswith("gemini-"))
+OTHER_MODELS = tuple(m for m in ALL_CLI_MODELS if not m.startswith("gemini-"))
+
 # Prefix aliases so clients that send their own names (Claude Code, harnesses) land on a CLI model.
 MODEL_ALIASES = (
     ("claude-opus", "claude-opus-4-6-thinking"),
@@ -110,6 +155,8 @@ def _load_profiles() -> list:
                       os.getenv("P2_HOME", os.path.join(home, ".agy-perfil2"))),
         _make_profile("p3", os.getenv("P3_NAME", "Profile 3"), os.getenv("P3_EMAIL", "profile3@example.com"),
                       os.getenv("P3_HOME", os.path.join(home, ".agy-perfil3"))),
+        _make_profile("p4", os.getenv("P4_NAME", "Profile 4"), os.getenv("P4_EMAIL", "profile4@example.com"),
+                      os.getenv("P4_HOME", os.path.join(home, ".agy-perfil4"))),
     ]
 
 
@@ -143,6 +190,7 @@ def _default_config() -> dict:
         "active_effort": DEFAULT_EFFORT,
         "active_model": f"{BASE_MODEL}-{DEFAULT_EFFORT}",
         "agy_internal_tools": True,
+        "profile_models": dict(PROFILE_DEFAULT_MODELS),
     }
 
 
@@ -168,6 +216,17 @@ def _normalize_config(cfg: dict) -> dict:
     out["active_effort"] = eff if eff in EFFORT_OPTIONS else DEFAULT_EFFORT
     out["active_model"] = BASE_MODEL if out["active_effort"] == "auto" else f"{BASE_MODEL}-{out['active_effort']}"
     out["agy_internal_tools"] = bool(out.get("agy_internal_tools", True))
+
+    # Normalize profile_models
+    profile_models = dict(base.get("profile_models", {}))
+    raw_pm = cfg.get("profile_models")
+    if isinstance(raw_pm, dict):
+        for pid, model in raw_pm.items():
+            if pid in PROFILE_INDEX and isinstance(model, str):
+                avail = PROFILE_AVAILABLE_MODELS.get(pid, [])
+                if model in avail:
+                    profile_models[pid] = model
+    out["profile_models"] = profile_models
     return out
 
 
@@ -234,7 +293,7 @@ def _model_entry(mid: str) -> dict:
     return {"id": mid, "object": "model", "created": 1728864000, "owned_by": owner, "permission": [], "root": mid, "parent": None}
 
 
-AVAILABLE_MODELS = [_model_entry(m) for m in GEMINI_MODELS + (BASE_MODEL,) + OTHER_MODELS]
+AVAILABLE_MODELS = [_model_entry(m) for m in ALL_CLI_MODELS + (BASE_MODEL,)]
 MODEL_INDEX = {m["id"]: m for m in AVAILABLE_MODELS}
 
 
@@ -279,6 +338,68 @@ def resolve_model(requested_model, cfg: dict = None) -> str:
     return f"{BASE_MODEL}-{resolve_effort(requested_model, cfg)}"
 
 
+def resolve_model_for_profile(requested_model: str, profile_id: str, cfg: dict) -> str:
+    """
+    Resolve model specifically for a given profile account.
+    If requested_model is not explicitly provided (or matches the global default),
+    the account's fixed default model (from cfg['profile_models']) is prioritized.
+    Also handles cross-account model mapping (e.g. Claude 4.6 vs Claude 5.5, Argon on p4).
+    """
+    supported = PROFILE_AVAILABLE_MODELS.get(profile_id, list(P13_MODELS))
+    profile_default = cfg.get("profile_models", {}).get(profile_id)
+    if not profile_default or profile_default not in supported:
+        profile_default = PROFILE_DEFAULT_MODELS.get(profile_id, supported[0])
+
+    if not requested_model or requested_model == cfg.get("active_model"):
+        return profile_default
+
+    m = str(requested_model).strip().lower()
+    if m in supported:
+        return m
+
+    eff = effort_from_model(m) or cfg.get("active_effort", DEFAULT_EFFORT)
+    if eff not in EFFORTS:
+        eff = DEFAULT_EFFORT
+
+    if "argon" in m:
+        if profile_id == "p4":
+            target = f"gemini-4-argon-{eff}"
+            return target if target in supported else "gemini-4-argon-low"
+        return f"gemini-3.8-flash-{eff}"
+
+    if "hydrogen" in m:
+        if profile_id == "p4":
+            target = f"gemini-4-hydrogen-{eff}"
+            return target if target in supported else "gemini-4-hydrogen-low"
+        return f"gemini-3.8-flash-{eff}"
+
+    if "orchestrator" in m:
+        if profile_id == "p4" and "gemini-pro-orchestrator-g1-pro" in supported:
+            return "gemini-pro-orchestrator-g1-pro"
+        return f"gemini-3.8-flash-{eff}"
+
+    if "opus" in m:
+        if profile_id == "p4":
+            target = f"claude-opus-5-5-{eff}"
+            return target if target in supported else "claude-opus-5-5-medium"
+        return "claude-opus-4-6-thinking"
+
+    if "sonnet" in m or ("claude" in m and "haiku" not in m and "opus" not in m):
+        if profile_id == "p4":
+            target = f"claude-sonnet-5-5-{eff}"
+            return target if target in supported else "claude-sonnet-5-5-medium"
+        return "claude-sonnet-4-6"
+
+    if "gpt" in m:
+        return "gpt-oss-120b-medium"
+
+    if "flash" in m or "gemini" in m:
+        target = f"gemini-3.8-flash-{eff}"
+        return target if target in supported else profile_default
+
+    return profile_default
+
+
 # ---------------------------------------------------------------------------
 # Execution
 # ---------------------------------------------------------------------------
@@ -297,10 +418,10 @@ def _debug_log(name: str, text: str):
         pass
 
 
-def run_turn(prompt: str, model: str, profiles: list, internal_tools: bool = True):
+def run_turn(prompt: str, model: str, profiles: list, internal_tools: bool = True, cfg: dict = None):
     """
     Generator. Yields ("delta", text) while the model streams, then one final
-    ("done", {"usage": {...}, "profile": profile, "response": full_text}).
+    ("done", {"usage": {...}, "profile": profile, "model": profile_model, "response": full_text}).
     Tries each profile in order; raises AgyError if all fail before any text
     was streamed. If a profile fails after streaming started, yields
     ("error", message) and stops (we can't restart on another account
@@ -308,13 +429,15 @@ def run_turn(prompt: str, model: str, profiles: list, internal_tools: bool = Tru
     """
     tokens_in = _estimate_tokens(prompt)
     last_error = "No enabled account could process the request."
+    cfg = cfg or get_config()
 
     for profile in profiles:
         streamed = ""
         proc = None
+        target_model = resolve_model_for_profile(model, profile["id"], cfg)
         with profile["semaphore"]:
             try:
-                proc = POOL.acquire(profile, model, internal_tools)
+                proc = POOL.acquire(profile, target_model, internal_tools)
                 final = None
                 for ev in proc.run_turn(prompt):
                     kind = ev.get("event")
@@ -340,11 +463,12 @@ def run_turn(prompt: str, model: str, profiles: list, internal_tools: bool = Tru
                 in_tok = int(usage.get("input_tokens") or tokens_in)
                 out_tok = int(usage.get("output_tokens") or _estimate_tokens(streamed))
                 _record_stats(profile, in_tok, out_tok)
-                record_tokens(profile["id"], model, in_tok, out_tok)
-                _debug_log("agy_calls.log", f"--- {time.time()} {profile['id']}/{model} ok in={in_tok} out={out_tok}\n")
+                record_tokens(profile["id"], target_model, in_tok, out_tok)
+                _debug_log("agy_calls.log", f"--- {time.time()} {profile['id']}/{target_model} ok in={in_tok} out={out_tok}\n")
                 yield ("done", {
                     "usage": {"prompt_tokens": in_tok, "completion_tokens": out_tok, "total_tokens": in_tok + out_tok},
                     "profile": profile,
+                    "model": target_model,
                     "response": streamed,
                 })
                 return
@@ -354,7 +478,7 @@ def run_turn(prompt: str, model: str, profiles: list, internal_tools: bool = Tru
             except AgyError as e:
                 last_error = str(e)
                 _record_stats(profile, tokens_in, 0, error=True)
-                _debug_log("agy_calls.log", f"--- {time.time()} {profile['id']}/{model} ERROR {last_error}\n")
+                _debug_log("agy_calls.log", f"--- {time.time()} {profile['id']}/{target_model} ERROR {last_error}\n")
                 if streamed:
                     yield ("error", last_error)
                     return
@@ -417,11 +541,16 @@ def _config_view(cfg: dict) -> dict:
         "active_profile": cfg["active_profile"],
         "active_effort": cfg["active_effort"],
         "active_model": cfg["active_model"],
+        "profile_models": cfg.get("profile_models", dict(PROFILE_DEFAULT_MODELS)),
+        "profile_models_available": PROFILE_AVAILABLE_MODELS,
+        "all_models": list(ALL_CLI_MODELS),
         "agy_internal_tools": cfg["agy_internal_tools"],
         "effort_options": list(EFFORT_OPTIONS),
         "profiles": [
             {"id": p["id"], "name": p["name"], "email": p["email"], "enabled": p["id"] in cfg["enabled_profiles"],
-             "active": p["id"] in cfg["enabled_profiles"]}
+             "active": p["id"] in cfg["enabled_profiles"],
+             "default_model": cfg.get("profile_models", {}).get(p["id"], PROFILE_DEFAULT_MODELS.get(p["id"], "gemini-3.8-flash-low")),
+             "available_models": PROFILE_AVAILABLE_MODELS.get(p["id"], list(P13_MODELS))}
             for p in PROFILES
         ],
         "models": [
@@ -483,6 +612,23 @@ def update_api_config():
         else:
             errors.append(f"unknown model: {data['active_model']}")
 
+    if "profile_models" in data:
+        pms = data["profile_models"]
+        if not isinstance(pms, dict):
+            errors.append("profile_models must be a JSON object mapping profile_id to model_id")
+        else:
+            curr_pm = dict(cfg.get("profile_models", {}))
+            for pid, mid in pms.items():
+                if pid not in PROFILE_INDEX:
+                    errors.append(f"unknown profile in profile_models: {pid}")
+                    continue
+                avail = PROFILE_AVAILABLE_MODELS.get(pid, [])
+                if mid not in avail:
+                    errors.append(f"model '{mid}' not available for profile '{pid}'")
+                    continue
+                curr_pm[pid] = mid
+            cfg["profile_models"] = curr_pm
+
     if "agy_internal_tools" in data:
         cfg["agy_internal_tools"] = bool(data["agy_internal_tools"])
 
@@ -490,7 +636,10 @@ def update_api_config():
         return jsonify({"ok": False, "error": "; ".join(errors), "config": _config_view(get_config())}), 400
 
     cfg = save_config(cfg)
-    POOL.prewarm([PROFILE_INDEX[pid] for pid in cfg["enabled_profiles"]], [resolve_model(None, cfg)], cfg["agy_internal_tools"])
+    models_to_prewarm = set()
+    for pid in cfg["enabled_profiles"]:
+        models_to_prewarm.add(resolve_model_for_profile(None, pid, cfg))
+    POOL.prewarm([PROFILE_INDEX[pid] for pid in cfg["enabled_profiles"]], list(models_to_prewarm), cfg["agy_internal_tools"])
     return jsonify({"ok": True, "config": _config_view(cfg)})
 
 
@@ -652,12 +801,12 @@ def chat_completions():
     profiles = get_target_profiles(cfg)
 
     if data.get("stream", False):
-        return _stream_chat(prompt, model, requested_model, profiles, cfg["agy_internal_tools"], tools_enabled)
+        return _stream_chat(prompt, model, requested_model, profiles, cfg["agy_internal_tools"], tools_enabled, cfg)
 
     parser = ToolCallParser(tools_enabled)
     done = None
     try:
-        for kind, payload in run_turn(prompt, model, profiles, cfg["agy_internal_tools"]):
+        for kind, payload in run_turn(prompt, requested_model, profiles, cfg["agy_internal_tools"], cfg):
             if kind == "delta":
                 parser.feed(payload)
             elif kind == "done":
@@ -677,6 +826,7 @@ def chat_completions():
     elif not content:
         message["content"] = ""
 
+    used_model = done.get("model", model) if done else model
     resp = jsonify({
         "id": make_id("chatcmpl"),
         "object": "chat.completion",
@@ -687,11 +837,11 @@ def chat_completions():
         "system_fingerprint": None,
     })
     resp.headers["X-Profile-Used"] = done["profile"]["id"]
-    resp.headers["X-Model-Used"] = model
+    resp.headers["X-Model-Used"] = used_model
     return resp
 
 
-def _stream_chat(prompt, model, requested_model, profiles, internal_tools, tools_enabled) -> Response:
+def _stream_chat(prompt, model, requested_model, profiles, internal_tools, tools_enabled, cfg=None) -> Response:
     cid = make_id("chatcmpl")
     ts = int(time.time())
 
@@ -709,7 +859,7 @@ def _stream_chat(prompt, model, requested_model, profiles, internal_tools, tools
         yield chunk({"role": "assistant", "content": ""})
         done = None
         try:
-            for kind, payload in run_turn(prompt, model, profiles, internal_tools):
+            for kind, payload in run_turn(prompt, requested_model, profiles, internal_tools, cfg):
                 if kind == "delta":
                     text = parser.feed(payload)
                     if text:
@@ -771,7 +921,7 @@ def completions():
     if data.get("stream", False):
         def generate():
             try:
-                for kind, payload in run_turn(prompt, model, profiles, cfg["agy_internal_tools"]):
+                for kind, payload in run_turn(prompt, requested_model, profiles, cfg["agy_internal_tools"], cfg):
                     if kind == "delta":
                         yield _sse({"id": cid, "object": "text_completion", "created": ts, "model": requested_model,
                                     "choices": [{"text": payload, "index": 0, "logprobs": None, "finish_reason": None}]})
@@ -792,7 +942,7 @@ def completions():
 
     text, done = "", None
     try:
-        for kind, payload in run_turn(prompt, model, profiles, cfg["agy_internal_tools"]):
+        for kind, payload in run_turn(prompt, requested_model, profiles, cfg["agy_internal_tools"], cfg):
             if kind == "delta":
                 text += payload
             elif kind == "done":
@@ -802,13 +952,14 @@ def completions():
     except AgyError as e:
         return _openai_error(str(e))
 
+    used_model = done.get("model", model) if done else model
     resp = jsonify({
         "id": cid, "object": "text_completion", "created": ts, "model": requested_model,
         "choices": [{"text": text.strip(), "index": 0, "logprobs": None, "finish_reason": "stop"}],
         "usage": done["usage"],
     })
     resp.headers["X-Profile-Used"] = done["profile"]["id"]
-    resp.headers["X-Model-Used"] = model
+    resp.headers["X-Model-Used"] = used_model
     return resp
 
 
@@ -856,7 +1007,10 @@ def _startup_prewarm():
     if os.getenv("AGY_PREWARM_ON_START", "true").lower() == "false":
         return
     cfg = get_config()
-    POOL.prewarm([PROFILE_INDEX[pid] for pid in cfg["enabled_profiles"]], [resolve_model(None, cfg)], cfg["agy_internal_tools"])
+    models_to_prewarm = set()
+    for pid in cfg["enabled_profiles"]:
+        models_to_prewarm.add(resolve_model_for_profile(None, pid, cfg))
+    POOL.prewarm([PROFILE_INDEX[pid] for pid in cfg["enabled_profiles"]], list(models_to_prewarm), cfg["agy_internal_tools"])
 
 
 _startup_prewarm()

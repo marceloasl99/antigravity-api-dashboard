@@ -28,8 +28,18 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>AGY — Control Panel & Google Quotas</title>
+  <script>
+    (function() {
+      try {
+        var theme = localStorage.getItem('agy_dashboard_theme') || 'dark';
+        if (['dark', 'black', 'light'].indexOf(theme) !== -1) {
+          document.documentElement.setAttribute('data-theme', theme);
+        }
+      } catch (e) {}
+    })();
+  </script>
   <style>
-    :root {
+    :root, [data-theme="dark"] {
       --bg: #0b0d13;
       --surface: #141722;
       --surface2: #1e2233;
@@ -43,6 +53,58 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       --text: #f3f4f6;
       --muted: #94a3b8;
       --radius: 12px;
+      --table-th: #191c2b;
+      --table-hover: rgba(255, 255, 255, 0.03);
+      --card-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
+      --rr-color: #c084fc;
+    }
+
+    [data-theme="black"] {
+      --bg: #000000;
+      --surface: #0a0a0a;
+      --surface2: #141414;
+      --border: #222222;
+      --accent: #3b82f6;
+      --accent2: #60a5fa;
+      --green: #10b981;
+      --red: #ef4444;
+      --yellow: #f59e0b;
+      --purple: #8b5cf6;
+      --text: #f5f5f5;
+      --muted: #888888;
+      --radius: 12px;
+      --table-th: #121212;
+      --table-hover: rgba(255, 255, 255, 0.05);
+      --card-shadow: 0 8px 24px rgba(0, 0, 0, 0.65);
+      --rr-color: #c084fc;
+    }
+
+    [data-theme="light"] {
+      --bg: #ffffff;
+      --surface: #f8fafc;
+      --surface2: #f1f5f9;
+      --border: #e2e8f0;
+      --accent: #2563eb;
+      --accent2: #1d4ed8;
+      --green: #059669;
+      --red: #dc2626;
+      --yellow: #d97706;
+      --purple: #7c3aed;
+      --text: #0f172a;
+      --muted: #64748b;
+      --radius: 12px;
+      --table-th: #e2e8f0;
+      --table-hover: rgba(0, 0, 0, 0.035);
+      --card-shadow: 0 4px 20px rgba(0, 0, 0, 0.06);
+      --rr-color: #7c3aed;
+    }
+
+    [data-theme="light"] .logo-icon {
+      box-shadow: 0 4px 12px rgba(37, 99, 235, 0.2);
+    }
+    [data-theme="light"] select option {
+      background: #ffffff;
+      color: #0f172a;
     }
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
@@ -106,6 +168,40 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       padding: 6px 10px; font-size: .8rem; cursor: pointer;
     }
 
+    /* ── THEME PICKER ── */
+    .theme-picker {
+      display: inline-flex;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 3px;
+      gap: 3px;
+    }
+    .theme-btn {
+      background: transparent;
+      color: var(--muted);
+      border: 1px solid transparent;
+      border-radius: 6px;
+      padding: 5px 10px;
+      font-size: 0.8rem;
+      font-weight: 600;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      transition: all .15s ease;
+      user-select: none;
+    }
+    .theme-btn:hover {
+      color: var(--text);
+    }
+    .theme-btn.active {
+      background: var(--surface2);
+      color: var(--accent);
+      border-color: var(--border);
+      box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+    }
+
     /* ── CONFIG PANEL (MAIN) ── */
     .config-panel {
       background: var(--surface);
@@ -113,7 +209,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       border-radius: var(--radius);
       padding: 24px;
       margin-bottom: 32px;
-      box-shadow: 0 8px 24px rgba(0,0,0,0.2);
+      box-shadow: var(--card-shadow);
     }
     .config-header {
       display: flex; align-items: center; justify-content: space-between;
@@ -142,7 +238,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
     /* Profile Direct Selector */
     .profile-select-grid {
-      display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
       gap: 14px;
     }
     .profile-select-card {
@@ -150,8 +246,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       border: 2px solid var(--border);
       border-radius: 10px;
       padding: 16px;
-      display: flex; align-items: center; justify-content: space-between;
-      cursor: pointer;
+      display: flex; flex-direction: column; gap: 12px;
       transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
     }
     .profile-select-card:hover {
@@ -163,6 +258,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       background: rgba(59, 130, 246, 0.08);
       box-shadow: 0 0 16px rgba(59, 130, 246, 0.25);
     }
+    .card-top { display: flex; align-items: center; justify-content: space-between; cursor: pointer; }
     .card-left { display: flex; align-items: center; gap: 12px; }
     .p-avatar {
       width: 40px; height: 40px; border-radius: 50%;
@@ -172,6 +268,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     .p-avatar.p1 { background: linear-gradient(135deg, #4285f4, #34a853); }
     .p-avatar.p2 { background: linear-gradient(135deg, #fbbc05, #ea4335); }
     .p-avatar.p3 { background: linear-gradient(135deg, #9c27b0, #3f51b5); }
+    .p-avatar.p4 { background: linear-gradient(135deg, #06b6d4, #0284c7); }
 
     .p-meta-name { font-weight: 700; font-size: 0.95rem; }
     .p-meta-email { font-size: 0.78rem; color: var(--muted); margin-top: 2px; }
@@ -188,10 +285,35 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       background: var(--surface); color: var(--muted); border: 1px solid var(--border);
     }
 
+    .profile-model-selector {
+      border-top: 1px solid var(--border);
+      padding-top: 10px;
+      display: flex; flex-direction: column; gap: 5px;
+    }
+    .profile-model-label {
+      font-size: 0.72rem; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: 0.03em;
+      display: flex; align-items: center; justify-content: space-between;
+    }
+    .profile-model-select {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      color: var(--text);
+      font-size: 0.82rem;
+      padding: 6px 10px;
+      border-radius: 6px;
+      width: 100%;
+      cursor: pointer;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+    .profile-model-select:focus {
+      border-color: var(--accent);
+    }
+
     .profile-select-card.disabled { opacity: 0.55; }
     .rr-badge {
       font-size: 0.65rem; font-weight: 700; padding: 2px 7px; border-radius: 6px; margin-left: 6px;
-      background: rgba(168, 85, 247, 0.18); color: #c084fc; border: 1px solid rgba(168, 85, 247, 0.4);
+      background: rgba(168, 85, 247, 0.18); color: var(--rr-color); border: 1px solid rgba(168, 85, 247, 0.4);
     }
     .engine-row { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
     .engine-hint { font-size: 0.78rem; color: var(--muted); max-width: 520px; }
@@ -284,7 +406,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       border-radius: var(--radius);
       padding: 24px;
       margin-bottom: 32px;
-      box-shadow: 0 8px 24px rgba(0,0,0,0.2);
+      box-shadow: var(--card-shadow);
     }
     .token-grid-cards {
       display: grid;
@@ -363,7 +485,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       width: 100%; border-collapse: collapse; font-size: 0.82rem;
     }
     .token-table th {
-      background: #191c2b; color: var(--muted); font-weight: 700;
+      background: var(--table-th); color: var(--muted); font-weight: 700;
       text-transform: uppercase; letter-spacing: 0.04em; padding: 11px 16px;
       text-align: left; border-bottom: 1px solid var(--border); position: sticky; top: 0; z-index: 1;
     }
@@ -374,7 +496,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       border-bottom: none;
     }
     .token-table tr:hover td {
-      background: rgba(255, 255, 255, 0.03);
+      background: var(--table-hover);
     }
     .token-table td.num {
       text-align: right; font-family: monospace; font-size: 0.85rem; font-weight: 600;
@@ -468,6 +590,17 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       </div>
     </div>
     <div class="header-actions">
+      <div class="theme-picker" role="group" aria-label="Theme selector">
+        <button type="button" class="theme-btn active" id="theme-btn-dark" onclick="setTheme('dark')" title="Escuro Atual (Azul / Slate)">
+          <span>🌙</span> <span>Escuro</span>
+        </button>
+        <button type="button" class="theme-btn" id="theme-btn-black" onclick="setTheme('black')" title="Escuro Preto (AMOLED / Fundo Preto)">
+          <span>⬛</span> <span>Preto</span>
+        </button>
+        <button type="button" class="theme-btn" id="theme-btn-light" onclick="setTheme('light')" title="Claro (Fundo Branco)">
+          <span>☀️</span> <span>Claro</span>
+        </button>
+      </div>
       <button class="btn-privacy active" id="privacyBtn" onclick="togglePrivacy()" title="Toggle sensitive data masking">
         <span id="privacyIcon">🔒</span> <span id="privacyText">Privacy: ON</span>
       </button>
@@ -692,6 +825,29 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </footer>
 
   <script>
+    function setTheme(theme) {
+      if (!['dark', 'black', 'light'].includes(theme)) theme = 'dark';
+      document.documentElement.setAttribute('data-theme', theme);
+      try {
+        localStorage.setItem('agy_dashboard_theme', theme);
+      } catch (e) {}
+      ['dark', 'black', 'light'].forEach(t => {
+        const btn = document.getElementById('theme-btn-' + t);
+        if (btn) {
+          if (t === theme) btn.classList.add('active');
+          else btn.classList.remove('active');
+        }
+      });
+    }
+
+    (function initTheme() {
+      let t = 'dark';
+      try {
+        t = localStorage.getItem('agy_dashboard_theme') || 'dark';
+      } catch (e) {}
+      setTheme(t);
+    })();
+
     let privacyMode = true; // Enabled by default to protect sensitive emails
     let currentConfig = {
       enabled_profiles: ['p1'],
@@ -736,6 +892,33 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     function formatProfileName(name, id) {
       if (!name) return `Profile ${id ? id.toUpperCase() : ''}`;
       return name.replace(/^Perfil\\s+/i, 'Profile ');
+    }
+
+    function formatModelName(m) {
+      if (!m) return '';
+      const map = {
+        'gemini-4-argon-high': 'Gemini 4 Argon (High)',
+        'gemini-4-argon-medium': 'Gemini 4 Argon (Medium)',
+        'gemini-4-argon-low': 'Gemini 4 Argon (Low)',
+        'gemini-4-hydrogen-high': 'Gemini 4 Hydrogen (High)',
+        'gemini-4-hydrogen-xhigh': 'Gemini 4 Hydrogen (XHigh)',
+        'gemini-4-hydrogen-medium': 'Gemini 4 Hydrogen (Medium)',
+        'gemini-4-hydrogen-low': 'Gemini 4 Hydrogen (Low)',
+        'gemini-pro-orchestrator-g1-pro': 'Gemini Orchestrator (Argon)',
+        'gemini-3.8-flash-high': 'Gemini 3.8 Flash (High)',
+        'gemini-3.8-flash-medium': 'Gemini 3.8 Flash (Medium)',
+        'gemini-3.8-flash-low': 'Gemini 3.8 Flash (Low)',
+        'claude-opus-5-5-high': 'Claude Opus 5.5 (High)',
+        'claude-opus-5-5-medium': 'Claude Opus 5.5 (Medium)',
+        'claude-opus-5-5-low': 'Claude Opus 5.5 (Low)',
+        'claude-sonnet-5-5-high': 'Claude Sonnet 5.5 (High)',
+        'claude-sonnet-5-5-medium': 'Claude Sonnet 5.5 (Medium)',
+        'claude-sonnet-5-5-low': 'Claude Sonnet 5.5 (Low)',
+        'claude-opus-4-6-thinking': 'Claude Opus 4.6 (Thinking)',
+        'claude-sonnet-4-6': 'Claude Sonnet 4.6 (Thinking)',
+        'gpt-oss-120b-medium': 'GPT-OSS 120B (Medium)'
+      };
+      return map[m] || m;
     }
 
     function fmt(n) {
@@ -829,23 +1012,53 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         ? `<span class="rr-badge">ROUND ROBIN</span> requests alternate between the enabled accounts; a failing account falls back to the next one`
         : `direct routing to one account &bull; enable a second account to activate round robin`;
 
-      // Profile grid (toggles)
+      // Profile grid (toggles & model selection)
       const pGrid = document.getElementById('profileSelectGrid');
-      const profileIds = profilesList.length ? profilesList.map(p => p.id) : ['p1', 'p2', 'p3'];
+      const profileIds = profilesList.length ? profilesList.map(p => p.id) : ['p1', 'p2', 'p3', 'p4'];
+      const profileModels = currentConfig.profile_models || {};
+      const profileModelsAvail = currentConfig.profile_models_available || {};
 
       pGrid.innerHTML = profileIds.map(pid => {
         const isOn = enabled.includes(pid);
         const meta = pMap[pid] || { name: `Profile ${pid.toUpperCase()}`, email: '' };
+        const availModels = profileModelsAvail[pid] || (pid === 'p4' ? [
+          'gemini-4-argon-medium', 'gemini-4-argon-high', 'gemini-4-argon-low',
+          'gemini-4-hydrogen-high', 'gemini-4-hydrogen-xhigh', 'gemini-4-hydrogen-medium', 'gemini-4-hydrogen-low',
+          'gemini-pro-orchestrator-g1-pro', 'gemini-3.8-flash-high', 'gemini-3.8-flash-medium', 'gemini-3.8-flash-low',
+          'claude-opus-5-5-low', 'claude-opus-5-5-medium', 'claude-opus-5-5-high',
+          'claude-sonnet-5-5-low', 'claude-sonnet-5-5-medium', 'claude-sonnet-5-5-high', 'gpt-oss-120b-medium'
+        ] : [
+          'gemini-3.8-flash-high', 'gemini-3.8-flash-medium', 'gemini-3.8-flash-low',
+          'claude-sonnet-4-6', 'claude-opus-4-6-thinking', 'gpt-oss-120b-medium'
+        ]);
+        const curModel = profileModels[pid] || (pid === 'p4' ? 'gemini-4-argon-low' : 'gemini-3.8-flash-low');
+
+        const modelOptions = availModels.map(m => {
+          const selected = m === curModel ? 'selected' : '';
+          return `<option value="${m}" ${selected}>${formatModelName(m)}</option>`;
+        }).join('');
+
         return `
-          <div class="profile-select-card ${isOn ? 'active' : 'disabled'}" onclick="toggleProfile('${pid}')" title="${isOn ? 'Click to disable' : 'Click to enable'}">
-            <div class="card-left">
-              <div class="p-avatar ${pid}">${pid.toUpperCase()}</div>
-              <div>
-                <div class="p-meta-name">${meta.name}</div>
-                <div class="p-meta-email">${maskEmail(meta.email)}</div>
+          <div class="profile-select-card ${isOn ? 'active' : 'disabled'}">
+            <div class="card-top" onclick="toggleProfile('${pid}')" title="${isOn ? 'Click to disable' : 'Click to enable'}">
+              <div class="card-left">
+                <div class="p-avatar ${pid}">${pid.toUpperCase()}</div>
+                <div>
+                  <div class="p-meta-name">${meta.name}</div>
+                  <div class="p-meta-email">${maskEmail(meta.email)}</div>
+                </div>
               </div>
+              <div class="active-tag">${isOn ? '★ ENABLED' : 'DISABLED'}</div>
             </div>
-            <div class="active-tag">${isOn ? '★ ENABLED' : 'DISABLED'}</div>
+            <div class="profile-model-selector" onclick="event.stopPropagation()">
+              <div class="profile-model-label">
+                <span>Default Model (Fixed)</span>
+                <span style="font-size:0.68rem; color:var(--accent2);">${availModels.length} models</span>
+              </div>
+              <select class="profile-model-select" onchange="changeProfileModel('${pid}', this.value)" title="Select default fixed model for ${pid.toUpperCase()}">
+                ${modelOptions}
+              </select>
+            </div>
           </div>
         `;
       }).join('');
@@ -905,6 +1118,21 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         }
       } catch (e) {
         showToast('Connection error saving accounts: ' + e.message, false);
+      }
+    }
+
+    async function changeProfileModel(pid, modelId) {
+      const pm = Object.assign({}, currentConfig.profile_models || {});
+      pm[pid] = modelId;
+      try {
+        const res = await postConfig({ profile_models: pm });
+        if (res.ok) {
+          showToast(`Default model for ${pid.toUpperCase()} set to ${formatModelName(modelId)}.`);
+        } else {
+          showToast('Error setting model: ' + (res.error || 'Failed'), false);
+        }
+      } catch (e) {
+        showToast('Connection error setting model: ' + e.message, false);
       }
     }
 
@@ -1204,7 +1432,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         `;
       } else if (currentTokenTab === 'profile') {
         const prof = tokenData.by_profile || {};
-        const pids = profilesList.length ? profilesList.map(p => p.id) : ['p1', 'p2', 'p3'];
+        const pids = profilesList.length ? profilesList.map(p => p.id) : ['p1', 'p2', 'p3', 'p4'];
         const pMap = {};
         profilesList.forEach(p => { pMap[p.id] = p; });
 

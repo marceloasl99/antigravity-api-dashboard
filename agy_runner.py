@@ -28,7 +28,25 @@ import threading
 import time
 import uuid
 
-AGY_BINARY = os.getenv("AGY_BINARY", os.path.expanduser("~/.local/bin/agy"))
+def _find_agy_binary() -> str:
+    env_bin = os.getenv("AGY_BINARY")
+    if env_bin and (os.path.isfile(env_bin) or shutil.which(env_bin)):
+        return env_bin
+    for cand in [
+        "/root/.local/bin/agy",
+        os.path.expanduser("~/.local/bin/agy"),
+        "/usr/local/bin/agy",
+        "/usr/bin/agy",
+    ]:
+        if os.path.isfile(cand) and os.access(cand, os.X_OK):
+            return cand
+    which_bin = shutil.which("agy")
+    if which_bin:
+        return which_bin
+    return os.path.expanduser("~/.local/bin/agy")
+
+
+AGY_BINARY = _find_agy_binary()
 # AGY_COMMAND lets tests (or exotic setups) run e.g. "python fake_agy.py".
 AGY_COMMAND = shlex.split(os.getenv("AGY_COMMAND", "")) or [AGY_BINARY]
 AGY_CWD = os.getenv("AGY_CWD", "/tmp" if os.path.isdir("/tmp") else tempfile.gettempdir())
