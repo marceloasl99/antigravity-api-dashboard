@@ -39,14 +39,13 @@ Designed for self-hosters and power users integrating local AI gateways into too
 
 ## 🚀 What's New in v4.0
 
-| Area | v3.0 | v4.0 |
-| :--- | :--- | :--- |
+| **RAM / CPU Footprint** | ~3.4 GB RAM, 28 processes across 3 gunicorn workers | **~940 MB RAM (~80% reduction)**, optimized single-worker gthread pool, periodic background process reaper, 2m dashboard refresh. |
 | **Profile Support & Tiers** | Profiles 1–3 (Gemini 3.8 Flash, Claude 4.6, GPT-OSS) | **4 Profiles supported (`p1`, `p2`, `p3`, `p4`)**, with support for advanced tier profiles (`p4`) having access to next-gen Gemini 4 and Claude 5.5 models. |
 | **Model Selection** | Limited catalog (6 models) | **All existing LLMs supported (20 unique models across profiles)**: `gemini-4-argon-*`, `gemini-4-hydrogen-*`, `gemini-pro-orchestrator-g1-pro`, `claude-opus-5-5-*`, `claude-sonnet-5-5-*`, `gemini-3.8-flash-*`, `claude-*-4-6`, and `gpt-oss-120b-medium`. Profile 4 exposes all 18 models. |
 | **Per-Account Fixed Default Model** | Single global model setting | **Fixed default model per Google account**: Choose and fix any supported model individually for each profile account directly from the Web Dashboard. |
 | **Cross-Account Model Resolution** | Strict model matching per profile | **Intelligent model resolution (`resolve_model_for_profile`)**: Handles model alias resolution, effort extraction, and maps generic requests (e.g. `claude-sonnet`) to the appropriate tier model (`claude-sonnet-5-5` on `p4`, `claude-sonnet-4-6` on `p1-p3`). |
 | **Warm Pool Multi-Model Prewarming** | Prewarmed only global default model | Prewarms the designated default model for each active account upon configuration save and startup. |
-| **Dashboard UI** | Simple account toggles | **Interactive Model Selector per Account Card** on Port 80, showing available model count and persistent selection via `POST /api/config`. |
+| **Dashboard UI** | Simple account toggles (30s refresh) | **Interactive Model Selector per Account Card** on Port 80, showing available model count, 2-minute auto-refresh and persistent selection via `POST /api/config`. |
 
 ---
 
@@ -192,20 +191,22 @@ Version 2.0 represented a major architectural upgrade over Version 1.0:
 
 ```mermaid
 flowchart TD
-    subgraph Clients ["💻 OpenAI-Compatible Clients"]
+    subgraph Clients ["💻 OpenAI & Anthropic Clients"]
         C1["LibreChat / OpenWebUI"]
-        C2["Cursor / Continue.dev"]
+        C2["Cursor / Continue.dev / Claude Code"]
         C3["LangChain / Python / cURL"]
     end
 
     subgraph Gateway ["⚡ Antigravity API Gateway (Port 8080)"]
-        G1["Gunicorn (3 Workers x 8 Threads)"]
+        G1["Gunicorn (1 Worker x 8 Threads)"]
         Config["Dynamic Config Store<br/>(agy_config.json)"]
-        Router{"Direct Active Router"}
+        Router{"Direct or Round-Robin Router<br/>(resolve_model_for_profile)"}
+        Pool["Warm Pool + Background Reaper<br/>(agy_runner.py)"]
         Tracker["Persistent Token Tracker<br/>(token_tracker.py / fcntl)"]
         
         G1 --> Router
         Config -.-> Router
+        Router --> Pool
         Router --> Tracker
     end
 
@@ -213,23 +214,25 @@ flowchart TD
         P1["Profile 1 (Primary /root)"]
         P2["Profile 2 (/root/.agy-perfil2)"]
         P3["Profile 3 (/root/.agy-perfil3)"]
+        P4["Profile 4 (/root/.agy-perfil4 - Adv. Tier)"]
     end
 
     subgraph Execution ["⚙️ Antigravity CLI Execution Engine"]
-        CLI["agy CLI Subprocess<br/>--model gemini-3.8-flash --effort low/med/high"]
+        CLI["agy CLI Subprocess<br/>--model [resolved_model] --agent gateway"]
         Safe["Non-Empty Stream Guard"]
     end
 
     subgraph Dashboard ["📊 Control Panel Web UI (Port 80)"]
-        UI["Real-time Web App"]
+        UI["Real-time Web App (2m Refresh)"]
+        Selector["Account Model Selectors"]
         Privacy["Privacy Masking Engine"]
-        Quotas["Real-time /usage Inspector"]
-        UI <--> Privacy & Quotas
+        Quotas["Real-time /usage Inspector (120s Cache)"]
+        UI <--> Selector & Privacy & Quotas
     end
 
-    C1 & C2 & C3 -->|OpenAI REST / SSE Streaming| Gateway
-    Router --> P1 & P2 & P3
-    P1 & P2 & P3 --> CLI --> Safe
+    C1 & C2 & C3 -->|OpenAI REST / Anthropic Messages| Gateway
+    Router --> P1 & P2 & P3 & P4
+    P1 & P2 & P3 & P4 --> CLI --> Safe
     Dashboard <-->|Admin Proxy| Gateway
 ```
 
@@ -300,7 +303,13 @@ mkdir -p /root/.agy-perfil3
 HOME=/root/.agy-perfil3 /root/.local/bin/agy auth login
 ```
 
-### Step 4: Configure Profiles
+### Step 4: Authenticate Profile 4 (Advanced Tier)
+```bash
+mkdir -p /root/.agy-perfil4
+HOME=/root/.agy-perfil4 /root/.local/bin/agy auth login
+```
+
+### Step 5: Configure Profiles
 Create your local `profiles.json` (ignored by Git):
 ```bash
 cp profiles.example.json profiles.json
@@ -326,6 +335,13 @@ cp profiles.example.json profiles.json
     "name": "Profile 3",
     "email": "your-account-3@gmail.com",
     "home": "/root/.agy-perfil3",
+    "concurrency": 4
+  },
+  {
+    "id": "p4",
+    "name": "Profile 4",
+    "email": "your-account-4@gmail.com",
+    "home": "/root/.agy-perfil4",
     "concurrency": 4
   }
 ]
@@ -365,12 +381,12 @@ Base URL: `http://<server-ip>:8080/v1`
 | `POST` | `/v1/chat/completions` | Standard OpenAI chat completion (streaming supported via `stream: true`) |
 | `POST` | `/v1/responses` | OpenAI compatibility alias |
 | `POST` | `/v1/completions` | Legacy completions endpoint |
-| `GET` | `/v1/models` | List available Gemini 3.8 Flash model configurations |
-| `GET` | `/v1/config` | Enabled accounts, routing mode, effort, engine options, pool stats |
-| `POST` | `/v1/config` | `{"enabled_profiles": ["p1","p2"]}`, `{"active_effort": "auto"}`, `{"agy_internal_tools": false}` (legacy `{"active_profile": "p2"}` still works and means "only p2") |
+| `GET` | `/v1/models` | List all available models (Gemini Flash/Argon/Hydrogen, Claude Opus/Sonnet, GPT-OSS) |
+| `GET` | `/v1/config` | Enabled accounts, routing mode, default models per profile (`profile_models`), effort, pool stats |
+| `POST` | `/v1/config` | Update enabled accounts, effort, or set fixed default model per account: `{"profile_models": {"p4": "gemini-4-argon-low"}}` |
 | `GET` | `/v1/tokens/usage` | Retrieve accumulated token usage summary |
-| `GET` | `/v1/profiles` | List configured accounts and real-time statistics |
-| `GET` | `/v1/profiles/usage` | Fetch real-time Google account quota consumption |
+| `GET` | `/v1/profiles` | List configured accounts, default models and real-time statistics |
+| `GET` | `/v1/profiles/usage` | Fetch real-time Google account quota consumption (cached 120s) |
 | `GET` | `/v1/health` | Service health status |
 
 ### Dynamic Configuration via API
@@ -378,10 +394,15 @@ Base URL: `http://<server-ip>:8080/v1`
 Switch the active account or reasoning effort programmatically:
 
 ```bash
-# Round robin across Profile 1 and Profile 2
+# Set fixed default model for Profile 4
 curl -X POST http://<server-ip>:8080/v1/config \
   -H "Content-Type: application/json" \
-  -d '{"enabled_profiles": ["p1", "p2"]}'
+  -d '{"profile_models": {"p4": "gemini-4-argon-low"}}'
+
+# Round robin across Profile 1, Profile 2, Profile 3 and Profile 4
+curl -X POST http://<server-ip>:8080/v1/config \
+  -H "Content-Type: application/json" \
+  -d '{"enabled_profiles": ["p1", "p2", "p3", "p4"]}'
 
 # Only Profile 2 (direct routing)
 curl -X POST http://<server-ip>:8080/v1/config -H "Content-Type: application/json" -d '{"active_profile": "p2"}'
