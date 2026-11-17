@@ -137,12 +137,12 @@ def register(app, svc):
         mid = _msg_id()
 
         if data.get("stream"):
-            return _stream(prompt, model, requested_model, profiles, cfg["agy_internal_tools"], tools_enabled, mid)
+            return _stream(prompt, model, requested_model, profiles, cfg["agy_internal_tools"], tools_enabled, mid, cfg)
 
         parser = ToolCallParser(tools_enabled)
         done = None
         try:
-            for kind, payload in svc.run_turn(prompt, model, profiles, cfg["agy_internal_tools"]):
+            for kind, payload in svc.run_turn(prompt, requested_model, profiles, cfg["agy_internal_tools"], cfg):
                 if kind == "delta":
                     parser.feed(payload)
                 elif kind == "done":
@@ -162,6 +162,7 @@ def register(app, svc):
         if not content:
             content.append({"type": "text", "text": ""})
         usage = done["usage"]
+        used_model = done.get("model", model) if done else model
         resp = jsonify({
             "id": mid, "type": "message", "role": "assistant", "model": requested_model,
             "content": content,
@@ -170,10 +171,10 @@ def register(app, svc):
             "usage": {"input_tokens": usage["prompt_tokens"], "output_tokens": usage["completion_tokens"]},
         })
         resp.headers["X-Profile-Used"] = done["profile"]["id"]
-        resp.headers["X-Model-Used"] = model
+        resp.headers["X-Model-Used"] = used_model
         return resp
 
-    def _stream(prompt, model, requested_model, profiles, internal_tools, tools_enabled, mid):
+    def _stream(prompt, model, requested_model, profiles, internal_tools, tools_enabled, mid, cfg=None):
         def generate():
             parser = ToolCallParser(tools_enabled)
             yield _sse("message_start", {"type": "message_start", "message": {
@@ -183,7 +184,7 @@ def register(app, svc):
             text_open = False
             done = None
             try:
-                for kind, payload in svc.run_turn(prompt, model, profiles, internal_tools):
+                for kind, payload in svc.run_turn(prompt, requested_model, profiles, internal_tools, cfg):
                     if kind == "delta":
                         text = parser.feed(payload)
                         if text:

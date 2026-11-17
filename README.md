@@ -1,10 +1,10 @@
 <div align="center">
 
-# ⚡ Antigravity API & Dashboard (v3.0)
-### *OpenAI-Compatible Gateway for Gemini 3.8 Flash — Warm Process Pool, Tool Calling, Multi-Account Round Robin & Quota Monitoring*
+# ⚡ Antigravity API & Dashboard (v4.0)
+### *OpenAI & Anthropic Compatible Gateway for Gemini, Claude & GPT-OSS — Multi-Tier Profile Architecture, Account-Level Fixed Default Models, Warm Process Pool & Quota Monitoring*
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg?style=for-the-badge)](LICENSE)
-[![Version: 3.0](https://img.shields.io/badge/Version-3.0.0-success.svg?style=for-the-badge)](https://github.com/marceloasl99/antigravity-api-dashboard/releases)
+[![Version: 4.0](https://img.shields.io/badge/Version-4.0.0-success.svg?style=for-the-badge)](https://github.com/marceloasl99/antigravity-api-dashboard/releases)
 [![Python: 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB.svg?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
 [![OpenAI Compatible](https://img.shields.io/badge/API-OpenAI%20v1%20Compatible-412991.svg?style=for-the-badge&logo=openai&logoColor=white)](https://platform.openai.com/docs/api-reference)
 [![Flask](https://img.shields.io/badge/Backend-Flask%20%26%20Gunicorn-000000.svg?style=for-the-badge&logo=flask&logoColor=white)](https://palletsprojects.com/p/flask/)
@@ -12,7 +12,7 @@
 
 <p align="center">
   <a href="#-overview">Overview</a> •
-  <a href="#-whats-new-in-v30">What's New in v3.0</a> •
+  <a href="#-whats-new-in-v40">What's New in v4.0</a> •
   <a href="#-dashboard-preview">Dashboard Preview</a> •
   <a href="#-architecture">Architecture</a> •
   <a href="#-quickstart">Quickstart</a> •
@@ -29,15 +29,25 @@
 
 ## 📖 Overview
 
-**Antigravity API & Dashboard** converts Google's **Antigravity CLI (`agy`)** into a high-performance, self-hosted **OpenAI-compatible REST API gateway**. It empowers you to run **Gemini 3.8 Flash** with selectable reasoning effort levels, monitor real-time token consumption across multi-worker environments, switch active Google accounts with zero downtime, and inspect your Google account quotas through a modern web control panel.
+**Antigravity API & Dashboard** converts Google's **Antigravity CLI (`agy`)** into a high-performance, self-hosted **OpenAI and Anthropic-compatible REST API gateway**. It empowers you to run **Gemini (Flash, Argon, Hydrogen, Orchestrator)**, **Claude (Opus 5.5, Sonnet 5.5, Opus 4.6, Sonnet 4.6)**, and **GPT-OSS** models with custom reasoning effort levels, monitor real-time token consumption across multi-worker environments, define fixed default models per Google account, switch active accounts with zero downtime, and inspect your Google account quotas through a modern web control panel.
 
-Designed for self-hosters and power users integrating Gemini into tools like **LibreChat**, **OpenWebUI**, **LiteLLM**, **Cursor**, **Continue.dev**, and **LangChain**.
+Designed for self-hosters and power users integrating local AI gateways into tools like **Claude Code**, **LibreChat**, **OpenWebUI**, **LiteLLM**, **Cursor**, **Continue.dev**, and **LangChain**.
 
 > 🔒 **100% Private & Self-Hosted**: Runs entirely in your private homelab or container (Proxmox LXC, Docker, Ubuntu/Debian). Built-in Privacy Mode protects and masks sensitive account credentials and emails.
 
 ---
 
-## 🚀 What's New in v3.0
+## 🚀 What's New in v4.0
+
+| **RAM / CPU Footprint** | ~3.4 GB RAM, 28 processes across 3 gunicorn workers | **~940 MB RAM (~80% reduction)**, optimized single-worker gthread pool, periodic background process reaper, 2m dashboard refresh. |
+| **Profile Support & Tiers** | Profiles 1–3 (Gemini 3.8 Flash, Claude 4.6, GPT-OSS) | **4 Profiles supported (`p1`, `p2`, `p3`, `p4`)**, with support for advanced tier profiles (`p4`) having access to next-gen Gemini 4 and Claude 5.5 models. |
+| **Model Selection** | Limited catalog (6 models) | **All existing LLMs supported (20 unique models across profiles)**: `gemini-4-argon-*`, `gemini-4-hydrogen-*`, `gemini-pro-orchestrator-g1-pro`, `claude-opus-5-5-*`, `claude-sonnet-5-5-*`, `gemini-3.8-flash-*`, `claude-*-4-6`, and `gpt-oss-120b-medium`. Profile 4 exposes all 18 models. |
+| **Per-Account Fixed Default Model** | Single global model setting | **Fixed default model per Google account**: Choose and fix any supported model individually for each profile account directly from the Web Dashboard. |
+| **Cross-Account Model Resolution** | Strict model matching per profile | **Intelligent model resolution (`resolve_model_for_profile`)**: Handles model alias resolution, effort extraction, and maps generic requests (e.g. `claude-sonnet`) to the appropriate tier model (`claude-sonnet-5-5` on `p4`, `claude-sonnet-4-6` on `p1-p3`). |
+| **Warm Pool Multi-Model Prewarming** | Prewarmed only global default model | Prewarms the designated default model for each active account upon configuration save and startup. |
+| **Dashboard UI** | Simple account toggles (30s refresh) | **Interactive Model Selector per Account Card** on Port 80, showing available model count, 2-minute auto-refresh and persistent selection via `POST /api/config`. |
+
+---
 
 | Area | v2.0 | v3.0 |
 | :--- | :--- | :--- |
@@ -181,20 +191,22 @@ Version 2.0 represented a major architectural upgrade over Version 1.0:
 
 ```mermaid
 flowchart TD
-    subgraph Clients ["💻 OpenAI-Compatible Clients"]
+    subgraph Clients ["💻 OpenAI & Anthropic Clients"]
         C1["LibreChat / OpenWebUI"]
-        C2["Cursor / Continue.dev"]
+        C2["Cursor / Continue.dev / Claude Code"]
         C3["LangChain / Python / cURL"]
     end
 
     subgraph Gateway ["⚡ Antigravity API Gateway (Port 8080)"]
-        G1["Gunicorn (3 Workers x 8 Threads)"]
+        G1["Gunicorn (1 Worker x 8 Threads)"]
         Config["Dynamic Config Store<br/>(agy_config.json)"]
-        Router{"Direct Active Router"}
+        Router{"Direct or Round-Robin Router<br/>(resolve_model_for_profile)"}
+        Pool["Warm Pool + Background Reaper<br/>(agy_runner.py)"]
         Tracker["Persistent Token Tracker<br/>(token_tracker.py / fcntl)"]
         
         G1 --> Router
         Config -.-> Router
+        Router --> Pool
         Router --> Tracker
     end
 
@@ -202,23 +214,25 @@ flowchart TD
         P1["Profile 1 (Primary /root)"]
         P2["Profile 2 (/root/.agy-perfil2)"]
         P3["Profile 3 (/root/.agy-perfil3)"]
+        P4["Profile 4 (/root/.agy-perfil4 - Adv. Tier)"]
     end
 
     subgraph Execution ["⚙️ Antigravity CLI Execution Engine"]
-        CLI["agy CLI Subprocess<br/>--model gemini-3.8-flash --effort low/med/high"]
+        CLI["agy CLI Subprocess<br/>--model [resolved_model] --agent gateway"]
         Safe["Non-Empty Stream Guard"]
     end
 
     subgraph Dashboard ["📊 Control Panel Web UI (Port 80)"]
-        UI["Real-time Web App"]
+        UI["Real-time Web App (2m Refresh)"]
+        Selector["Account Model Selectors"]
         Privacy["Privacy Masking Engine"]
-        Quotas["Real-time /usage Inspector"]
-        UI <--> Privacy & Quotas
+        Quotas["Real-time /usage Inspector (120s Cache)"]
+        UI <--> Selector & Privacy & Quotas
     end
 
-    C1 & C2 & C3 -->|OpenAI REST / SSE Streaming| Gateway
-    Router --> P1 & P2 & P3
-    P1 & P2 & P3 --> CLI --> Safe
+    C1 & C2 & C3 -->|OpenAI REST / Anthropic Messages| Gateway
+    Router --> P1 & P2 & P3 & P4
+    P1 & P2 & P3 & P4 --> CLI --> Safe
     Dashboard <-->|Admin Proxy| Gateway
 ```
 
@@ -289,7 +303,13 @@ mkdir -p /root/.agy-perfil3
 HOME=/root/.agy-perfil3 /root/.local/bin/agy auth login
 ```
 
-### Step 4: Configure Profiles
+### Step 4: Authenticate Profile 4 (Advanced Tier)
+```bash
+mkdir -p /root/.agy-perfil4
+HOME=/root/.agy-perfil4 /root/.local/bin/agy auth login
+```
+
+### Step 5: Configure Profiles
 Create your local `profiles.json` (ignored by Git):
 ```bash
 cp profiles.example.json profiles.json
@@ -315,6 +335,13 @@ cp profiles.example.json profiles.json
     "name": "Profile 3",
     "email": "your-account-3@gmail.com",
     "home": "/root/.agy-perfil3",
+    "concurrency": 4
+  },
+  {
+    "id": "p4",
+    "name": "Profile 4",
+    "email": "your-account-4@gmail.com",
+    "home": "/root/.agy-perfil4",
     "concurrency": 4
   }
 ]
@@ -354,12 +381,12 @@ Base URL: `http://<server-ip>:8080/v1`
 | `POST` | `/v1/chat/completions` | Standard OpenAI chat completion (streaming supported via `stream: true`) |
 | `POST` | `/v1/responses` | OpenAI compatibility alias |
 | `POST` | `/v1/completions` | Legacy completions endpoint |
-| `GET` | `/v1/models` | List available Gemini 3.8 Flash model configurations |
-| `GET` | `/v1/config` | Enabled accounts, routing mode, effort, engine options, pool stats |
-| `POST` | `/v1/config` | `{"enabled_profiles": ["p1","p2"]}`, `{"active_effort": "auto"}`, `{"agy_internal_tools": false}` (legacy `{"active_profile": "p2"}` still works and means "only p2") |
+| `GET` | `/v1/models` | List all available models (Gemini Flash/Argon/Hydrogen, Claude Opus/Sonnet, GPT-OSS) |
+| `GET` | `/v1/config` | Enabled accounts, routing mode, default models per profile (`profile_models`), effort, pool stats |
+| `POST` | `/v1/config` | Update enabled accounts, effort, or set fixed default model per account: `{"profile_models": {"p4": "gemini-4-argon-low"}}` |
 | `GET` | `/v1/tokens/usage` | Retrieve accumulated token usage summary |
-| `GET` | `/v1/profiles` | List configured accounts and real-time statistics |
-| `GET` | `/v1/profiles/usage` | Fetch real-time Google account quota consumption |
+| `GET` | `/v1/profiles` | List configured accounts, default models and real-time statistics |
+| `GET` | `/v1/profiles/usage` | Fetch real-time Google account quota consumption (cached 120s) |
 | `GET` | `/v1/health` | Service health status |
 
 ### Dynamic Configuration via API
@@ -367,10 +394,15 @@ Base URL: `http://<server-ip>:8080/v1`
 Switch the active account or reasoning effort programmatically:
 
 ```bash
-# Round robin across Profile 1 and Profile 2
+# Set fixed default model for Profile 4
 curl -X POST http://<server-ip>:8080/v1/config \
   -H "Content-Type: application/json" \
-  -d '{"enabled_profiles": ["p1", "p2"]}'
+  -d '{"profile_models": {"p4": "gemini-4-argon-low"}}'
+
+# Round robin across Profile 1, Profile 2, Profile 3 and Profile 4
+curl -X POST http://<server-ip>:8080/v1/config \
+  -H "Content-Type: application/json" \
+  -d '{"enabled_profiles": ["p1", "p2", "p3", "p4"]}'
 
 # Only Profile 2 (direct routing)
 curl -X POST http://<server-ip>:8080/v1/config -H "Content-Type: application/json" -d '{"active_profile": "p2"}'
@@ -438,7 +470,22 @@ endpoints:
 
 ## 📜 Version History
 
-### Version 3.0.0 (Current)
+### Version 4.0.0 (Current)
+- **Profile 4 Support**: Added support for 4th profile account with advanced tier capabilities.
+- **Full LLM Catalog (20 Models)**:
+  - Gemini 4 Argon (`low`, `medium`, `high`)
+  - Gemini 4 Hydrogen (`low`, `medium`, `high`, `xhigh`)
+  - Gemini Orchestrator (`gemini-pro-orchestrator-g1-pro`)
+  - Claude Opus 5.5 (`low`, `medium`, `high`)
+  - Claude Sonnet 5.5 (`low`, `medium`, `high`)
+  - Gemini 3.8 Flash (`low`, `medium`, `high`, `auto`)
+  - Claude Sonnet 4.6 & Claude Opus 4.6 Thinking
+  - GPT-OSS 120B (Medium)
+- **Account-Level Fixed Default Model**: Select and fix a designated default model for each Google account directly from the UI or via API (`profile_models`).
+- **Dynamic Cross-Account Fallback & Routing**: Automatic resolution of model aliases and tiers when round-robin routing between different account tiers.
+- **Enhanced Web Dashboard**: Embedded model dropdown in account cards on Port 80, dynamic model counts, and improved layout responsiveness.
+
+### Version 3.0.0
 - Warm process pool (`agy_runner.py`) — requests skip the CLI cold start.
 - OpenAI tool calling (`tool_calling.py`), streaming included.
 - 1–3 enabled accounts: direct routing or round robin with fallback.

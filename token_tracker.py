@@ -49,6 +49,7 @@ def _init_data():
             "p1": _empty_bucket(),
             "p2": _empty_bucket(),
             "p3": _empty_bucket(),
+            "p4": _empty_bucket(),
         },
         "recent_requests": [],
         "last_updated": None,
