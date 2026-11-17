@@ -648,7 +648,7 @@ def update_api_config():
 # ---------------------------------------------------------------------------
 
 _usage_cache: dict = {}
-_usage_cache_ttl = 60
+_usage_cache_ttl = 120
 _usage_lock = threading.Lock()
 
 

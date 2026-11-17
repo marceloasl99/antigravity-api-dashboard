@@ -278,6 +278,17 @@ class WarmPool:
         self._lock = threading.Lock()
         self._generation = 0  # bumped on shutdown so in-flight warm-ups are discarded
         self._stats = {"hits": 0, "misses": 0, "spawned": 0, "recycled": 0}
+        self._reaper_thread = threading.Thread(target=self._periodic_reaper, daemon=True, name="agy-reaper")
+        if self.enabled:
+            self._reaper_thread.start()
+
+    def _periodic_reaper(self):
+        while True:
+            time.sleep(60)
+            try:
+                self.prune_stale(keep_keys=None)
+            except Exception:
+                pass
 
     # -- public ------------------------------------------------------------
     def acquire(self, profile: dict, model: str, internal_tools: bool = True) -> AgyProcess:
@@ -307,9 +318,35 @@ class WarmPool:
         return proc
 
     def prewarm(self, profiles: list, models: list, internal_tools: bool = True):
+        # Keep only processes for active (profile, model, tools) keys; prune stale keys
+        needed_keys = set()
         for p in profiles:
             for m in models:
+                needed_keys.add((p["id"], m, internal_tools))
                 self._refill_async(p, m, internal_tools)
+        self.prune_stale(needed_keys)
+
+    def prune_stale(self, keep_keys: set = None):
+        """Close processes whose keys are no longer active or that exceeded max_idle."""
+        to_close = []
+        now = time.time()
+        with self._lock:
+            for key, bucket in list(self._ready.items()):
+                alive_bucket = []
+                for proc in bucket:
+                    is_stale_key = (keep_keys is not None and key not in keep_keys)
+                    is_expired = (now - proc.created_at) >= self.max_idle
+                    if is_stale_key or is_expired or not proc.alive():
+                        to_close.append(proc)
+                        self._stats["recycled"] += 1
+                    else:
+                        alive_bucket.append(proc)
+                if alive_bucket:
+                    self._ready[key] = alive_bucket
+                else:
+                    self._ready.pop(key, None)
+        for proc in to_close:
+            proc.close()
 
     def stats(self) -> dict:
         with self._lock:

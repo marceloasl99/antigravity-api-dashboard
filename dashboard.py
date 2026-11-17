@@ -608,9 +608,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         Auto refresh:
         <select id="autoRefreshSelect" onchange="setAutoRefresh(this.value)">
           <option value="0">Disabled</option>
-          <option value="15">15s</option>
-          <option value="30" selected>30s</option>
+          <option value="30">30s</option>
           <option value="60">1m</option>
+          <option value="120" selected>2m</option>
+          <option value="300">5m</option>
         </select>
       </div>
       <div class="last-update" id="lastUpdate">—</div>
@@ -1524,7 +1525,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
     // Initial load
     loadAll(false);
-    setAutoRefresh(30);
+    setAutoRefresh(120);
   </script>
 </body>
 </html>
